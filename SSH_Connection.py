@@ -36,7 +36,7 @@ domstats [--raw] [--enforce] [--backing] [--state] [--cpu-total] [--balloon] [--
 
 # TODO: Separate commands
 
-command = #'virsh start '+vm_name #'virsh list --all' #''ip a'
+command = 'ip a'  # 'virsh start '+vm_name #'virsh list --all' #''ip a'
 
 
 #logging.basicConfig(level=logging.DEBUG, format='%(name)s: %(message)s',filename=time.strftime('%y%m%d_%H%M%S',time.localtime())+'.log')
@@ -59,12 +59,12 @@ try:
 
     stdin,stdout,stderr = client_ssh.exec_command(command)
 
-    if stderr > 0:
-        for line in stderr.readlines():
-            print line.strip()
-    else:
-        for line in stdout.readlines():
-            print line.strip()
+    for line in stdout.readlines():
+        print line.strip()
+
+    for line in stderr.readlines():
+        print line.strip()
+
 except paramiko.SSHException as e:
     logger.error(msg=e.message)
 
