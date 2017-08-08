@@ -5,6 +5,8 @@ import logging
 import threading
 import time
 from Host_Object import HostInfo as Host
+import os
+import sys
 
 '''
 Main controller to interact with sources and openvim
@@ -24,15 +26,43 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
         data = self.request.recv(buffer_size)
         cur_thread = threading.current_thread()
         response = '{}: {}'.format(cur_thread.name, data)
-        logger = logging.getLogger(cur_thread.name)
+        # logger = logging.getLogger(cur_thread.name)
         logger.debug('recv() from ' + self.client_address[0])
 
         # TODO: implement algo. of selecting host
-        self.request.sendall(response)
+        lock_shared_resource.acquire()
+        try:
+            self.request.sendall(response)
+        finally:
+            lock_shared_resource.release()
 
 
 class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
     pass
+
+
+def loadHostList(host_file):
+    if not os.path.isfile(host_file):
+        text = 'Host file is not existed: ' + host_file
+        print text
+        logger.error(text)
+        return False, {}
+
+    host_list = []
+    with open(host_file) as file:
+        for line in file:
+            read = line.strip().split()
+            try:
+                # [0]    [1]     [2]
+                # ip     usr     pwd
+                h = Host(read[0], read[1], read[2])
+            except:
+                text = 'Cannot add host'
+                logger.error(text)
+                continue
+            host_list.append(h)
+
+    return True, host_list
 
 
 # TODO: send API to openvim to look up host
@@ -47,22 +77,37 @@ _port = 12076  # fix port
 
 if __name__ == "__main__":
 
+    lock_shared_resource = threading.RLock()
+
+    # Handle logging
     streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
     # logging.basicConfig(format=streamformat, level=logging.DEBUG)
-    logging.basicConfig(level=logging.DEBUG, format=streamformat,
-                        filename=time.strftime('%y%m%d_%H%M', time.localtime()) + '.log')
+    logging.basicConfig(level=logging.DEBUG, format=streamformat, filename='controller_log.log', filemode='w')
+
+    # flog = logging.FileHandler('controller_log.log', mode='w')
+    # flog.setLevel(logging.DEBUG)
+    console = logging.StreamHandler(stream=sys.stdout)
+    console.setLevel(logging.INFO)
+
+    formatter = logging.Formatter(fmt=streamformat)
+
+    # flog.setFormatter(formatter)
+    console.setFormatter(formatter)
 
     logger = logging.getLogger('Controller')
     logger.setLevel(logging.DEBUG)
+    logger.addHandler(console)
+    #logger.addHandler(flog)
 
     # Port 0 means to select an arbitrary unused port
     # HOST, PORT = "localhost", 0
     HOST = _serverAddress
     PORT = _port
 
-    # Create host
-    host1 = Host('131.112.21.86', 'host', '123qweasd')
-    host1.update()
+    # Create host list
+    logger.info('Connecting host(s)...')
+    host_file = 'host_file.txt'
+    isSuccess, host_list = loadHostList(host_file)
     time.sleep(1)
 
     logger.debug('Start sever_thread waiting requests for sources')
@@ -73,20 +118,27 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
     logger.debug('Server loop running in thread' + server_thread.name)
-
     logger.info('Controller is ready')
+
     try:
         while True:
             time.sleep(10)
-            host1.update()
+            logger.info('Update host(s)')
+            lock_shared_resource.acquire()
+            try:
+                for h in host_list:
+                    h.update()
+            finally:
+                lock_shared_resource.release()
     except (KeyboardInterrupt, SystemExit):
         pass
 
-    logger.debug('disconnect host(s)')
+    logger.info('Disconnecting host(s)...')
 
-    host1.close()
+    for h in host_list:
+        h.close()
 
-    logger.debug('shut down a server')
+    logger.debug('Shut down a server')
     server.shutdown()
     server.server_close()
 

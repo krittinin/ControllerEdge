@@ -24,6 +24,8 @@ class HostInfo():
         global logger
         logger = logging.getLogger('Host ' + host_ip)
 
+        self.update()
+
     def ssh_connect(self):
         try:
             # Connect SSH
