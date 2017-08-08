@@ -7,8 +7,6 @@ import time
 import logging
 
 
-
-
 class HostInfo():
     def __init__(self, host_ip, user, password):
         self.host = host_ip
@@ -20,9 +18,10 @@ class HostInfo():
         self.password = password
         self.ssh_con = None
         self.status = False
+        self.num_of_proc = None
 
         global logger
-        logger = logging.getLogger('Host ' + host_ip)
+        logger = logging.getLogger('Host')
 
         self.update()
 
@@ -35,13 +34,13 @@ class HostInfo():
             self.ssh_con.connect(self.host, username=self.user, password=self.password, timeout=10)  # , None)
             self.status = True
         except paramiko.ssh_exception.SSHException as e:
-            logger.error("ssh_connect ssh Exception:", e.message)
+            logger.error(self.host + ": ssh_connect ssh Exception:", e.message)
             self.status = False
 
     def close(self):
         self.status = False
         self.ssh_con.close()
-        logger.debug('closed')
+        logger.debug(self.host + ': closed')
 
     def ping(self, count=2, timeout=2, pck_size=1024):
         '''
@@ -53,7 +52,7 @@ class HostInfo():
         avg_rtt = maxint
 
         try:
-            if system().lower() == 'windows:':
+            if system().lower() == 'windows':
                 # for windows
                 ping_out = subprocess.check_output(
                     ['ping', self.host, '-n', str(count), '-l', str(pck_size), '-w', str(timeout * 1000)]).splitlines()
@@ -79,16 +78,17 @@ class HostInfo():
                 # TODO: windows ping
 
         except subprocess.CalledProcessError as e:
-            logger.error('CalledProcessError: ' + e.message)
+            logger.error(self.host + ': CalledProcessError: ' + e.message)
         except ValueError:
-            logger.error('ValueError: ' + 'check ping result format')
+            logger.error(self.host + ': ValueError: ' + 'check ping result format')
         except Exception as e:
-            logger.error('Unknown error: ' + e.message)
+            logger.error(self.host + ': Unknown error: ' + e.message)
         finally:
             return avg_rtt
 
     def vmstat(self):
-        free_mem, cpu_ideal = None, None
+        # find free mem and idle cpu
+        free_mem, cpu_idle = None, None
         if not self.status:
             self.ssh_connect()
 
@@ -110,18 +110,49 @@ class HostInfo():
                 vmstat_result = re.split('\s+', string)
 
                 free_mem = int(vmstat_result[3])
-                cpu_ideal = int(vmstat_result[14])
+                cpu_idle = int(vmstat_result[14])
 
             except paramiko.ssh_exception.SSHException as e:
-                logger.error(": ssh_connect ssh Exception:", e.message)
+                logger.error(self.host + ': ssh_connect ssh Exception:', e.message)
                 self.ssh_connect()
             except ValueError:
-                logger.error("Value error: vmstat not in defined format")
+                logger.error(self.host + ': Value error: vmstat not in defined format')
 
-            return free_mem, cpu_ideal
+            return free_mem, cpu_idle
+
+    def pc_count(self):
+        # ps aux | wc -l
+        process_count = None
+        if not self.status:
+            self.ssh_connect()
+
+        if self.status:
+            try:
+                command = "ps aux | wc -l"
+                _, stdout, stderr = self.ssh_con.exec_command(command)
+
+                # 356 --> #of proc
+
+                string = None
+                for line in stdout.readlines():
+                    string = line.strip()
+                pc_result = re.split('\s+', string)
+
+                process_count = int(pc_result[0])
+
+            except paramiko.ssh_exception.SSHException as e:
+                logger.error(self.host + ': ssh_connect ssh Exception:', e.message)
+                self.ssh_connect()
+            except ValueError:
+                logger.error(self.host + ': Value error: \'pc aux\' not in defined format')
+
+            return process_count
 
     def update(self):
-        logger.debug("update host")
+        logger.debug(self.host + ': updated')
         self.last_update = time.localtime()
         self.mem, self.cpu = self.vmstat()
         self.rtt = self.ping(count=4)
+        self.num_of_proc = self.pc_count()
+
+        # print self.host, self.mem, self.cpu, self.rtt

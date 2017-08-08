@@ -19,6 +19,8 @@ global logger
 # logging.basicConfig(level=logging.ERROR, format='%(name)s: %(message)s')
 
 buffer_size = 1024
+_controller_interval = 10  # second
+_policy = 1  # 1: random, 2: lowest latency
 
 
 class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
@@ -43,9 +45,7 @@ class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
 
 def loadHostList(host_file):
     if not os.path.isfile(host_file):
-        text = 'Host file is not existed: ' + host_file
-        print text
-        logger.error(text)
+        logger.error('Host file is not existed: ' + host_file)
         return False, {}
 
     host_list = []
@@ -57,11 +57,9 @@ def loadHostList(host_file):
                 # ip     usr     pwd
                 h = Host(read[0], read[1], read[2])
             except:
-                text = 'Cannot add host'
-                logger.error(text)
+                logger.error('Cannot add host')
                 continue
             host_list.append(h)
-
     return True, host_list
 
 
@@ -72,8 +70,8 @@ def loadHostList(host_file):
 # TODO: list and find IP of VM in host
 
 
-_serverAddress = 'localhost'  # host ip
-_port = 12076  # fix port
+_serverAddress = '131.112.21.86'  # host ip
+_port = 12123  # fix port
 
 if __name__ == "__main__":
 
@@ -84,20 +82,14 @@ if __name__ == "__main__":
     # logging.basicConfig(format=streamformat, level=logging.DEBUG)
     logging.basicConfig(level=logging.DEBUG, format=streamformat, filename='controller_log.log', filemode='w')
 
-    # flog = logging.FileHandler('controller_log.log', mode='w')
-    # flog.setLevel(logging.DEBUG)
     console = logging.StreamHandler(stream=sys.stdout)
     console.setLevel(logging.INFO)
-
     formatter = logging.Formatter(fmt=streamformat)
-
-    # flog.setFormatter(formatter)
     console.setFormatter(formatter)
 
     logger = logging.getLogger('Controller')
     logger.setLevel(logging.DEBUG)
     logger.addHandler(console)
-    #logger.addHandler(flog)
 
     # Port 0 means to select an arbitrary unused port
     # HOST, PORT = "localhost", 0
@@ -122,7 +114,7 @@ if __name__ == "__main__":
 
     try:
         while True:
-            time.sleep(10)
+            time.sleep(_controller_interval)
             logger.info('Update host(s)')
             lock_shared_resource.acquire()
             try:
@@ -142,5 +134,5 @@ if __name__ == "__main__":
     server.shutdown()
     server.server_close()
 
-    logger.debug('Exit')
+    logger.info('Exit')
     exit()

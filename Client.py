@@ -3,7 +3,7 @@ import socket
 buffer_size = 1024
 
 _serverAddress = '131.112.21.86'
-_port = 12076
+_port = 12123
 
 
 def client_action(ip, port, message):
