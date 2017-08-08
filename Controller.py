@@ -4,6 +4,7 @@ import SocketServer
 import logging
 import threading
 import time
+from Host_Object import HostInfo as Host
 
 '''
 Main controller to interact with sources and openvim
@@ -12,14 +13,12 @@ Main controller to interact with sources and openvim
 # assume host is VM host1
 
 global logger
-# logging.basicConfig(level=logging.DEBUG, format='%(name)s: %(message)s', filename=time.strftime('%y%m%d_%H%M', time.localtime()) + '.log')
 
-logging.basicConfig(level=logging.DEBUG, format='%(name)s: %(message)s')
+# logging.basicConfig(level=logging.ERROR, format='%(name)s: %(message)s')
 
 buffer_size = 1024
 
 
-# TODO: create thread waiting for sources' request
 class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
     def handle(self):
         data = self.request.recv(buffer_size)
@@ -38,9 +37,6 @@ class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
 
 # TODO: send API to openvim to look up host
 
-# TODO: ssh to host for update info (openvim)?
-
-# TODO: measure RTT to host
 
 
 # TODO: list and find IP of VM in host
@@ -50,15 +46,26 @@ _serverAddress = 'localhost'  # host ip
 _port = 12076  # fix port
 
 if __name__ == "__main__":
+
+    streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
+    # logging.basicConfig(format=streamformat, level=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG, format=streamformat,
+                        filename=time.strftime('%y%m%d_%H%M', time.localtime()) + '.log')
+
+    logger = logging.getLogger('Controller')
+    logger.setLevel(logging.DEBUG)
+
     # Port 0 means to select an arbitrary unused port
     # HOST, PORT = "localhost", 0
     HOST = _serverAddress
     PORT = _port
 
-    logger = logging.getLogger('Controller')
+    # Create host
+    host1 = Host('131.112.21.86', 'host', '123qweasd')
+    host1.update()
+    time.sleep(1)
 
-    logger.debug('Start thread waiting request for sources')
-
+    logger.debug('Start sever_thread waiting requests for sources')
     server = ThreadedTCPServer((HOST, PORT), ThreadedTCPRequestHandler)
     ip, port = server.server_address
     server_thread = threading.Thread(target=server.serve_forever)
@@ -67,12 +74,21 @@ if __name__ == "__main__":
     server_thread.start()
     logger.debug('Server loop running in thread' + server_thread.name)
 
+    logger.info('Controller is ready')
     try:
         while True:
-            pass
+            time.sleep(10)
+            host1.update()
     except (KeyboardInterrupt, SystemExit):
         pass
 
-    logger.debug('Controller is down')
+    logger.debug('disconnect host(s)')
+
+    host1.close()
+
+    logger.debug('shut down a server')
     server.shutdown()
     server.server_close()
+
+    logger.debug('Exit')
+    exit()
