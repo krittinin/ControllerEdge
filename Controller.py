@@ -5,12 +5,11 @@ import logging
 import threading
 import time
 import yaml
-
 import copy
-
 from Host_Object import Host
 import os
 import sys
+import random
 
 '''
 Main controller to interact with sources and openvim
@@ -20,41 +19,122 @@ global logger
 global active_host_list
 global controller_is_ready
 controller_is_ready = False
+
+global total_request, total_reject
+total_request, total_reject = 0, 0
+
+# global condition
+# condition = threading.Condition()
+
 # logging.basicConfig(level=logging.ERROR, format='%(name)s: %(message)s')
 
 buffer_size = 1024
-_controller_interval = 10  # second
-_policy = 1  # 1: random, 2: lowest latency
+controller_interval = 10  # second
+policy = 2  # 1: random, 2: lowest latency
+
+
+def calculate_commp_latency(host):
+    ttl = 0
+    factor = 0
+    # TODO: find a way to cal it....
+    ttl = host['cpu'] / host['proc'] * factor
+    return ttl
+
+
+def check_constrain(active_host, max_latency):
+    # assume permissive syst.
+
+    candidate_hosts = []
+    # get total_latncy for each host
+    for host in active_host:
+        host['total_latency'] = host['rtt'] + calculate_commp_latency(host)
+        # check 1: new wk not grater max.latency
+        print host['total_latency']
+        if 0 < host['total_latency'] <= max_latency:
+            candidate_hosts.append(host)
+            # ckeck others are ok
+            # TODO: 2: not make other .... if stick system
+    return candidate_hosts
+
+
+def select_host(policy, active_host, max_latency):
+    is_accepted, host_ip, host_port = False, None, None
+
+    candidate_hosts = check_constrain(active_host, max_latency)
+
+    if policy == 1:
+        is_accepted, host_ip, host_port = select_random(candidate_hosts)
+    elif policy == 2:
+        is_accepted, host_ip, host_port = select_low_latency(candidate_hosts)
+    return is_accepted, host_ip, host_port
+
+
+def select_random(candidate_host):
+    is_accepted, host_ip, host_port = False, None, None
+    if len(candidate_host) > 0:
+        h = random.choice(candidate_host)
+        is_accepted, host_ip, host_port = True, h['ip'], h['port']
+    return is_accepted, host_ip, host_port
+
+
+def select_low_latency(candidate_host):
+    is_accepted, host_ip, host_port = False, None, None
+    if len(candidate_host) == 0:
+        return is_accepted, host_ip, host_port
+    key = 'total_latency'
+    min_latency = min(l[key] for l in candidate_host)
+    can = []
+    for c in candidate_host:
+        if c[key] == min_latency:
+            can.append(c)
+    if len(can) <= 0:
+        raise Exception('Something wrong while selecting')
+    else:
+        h = random.choice(can)
+        is_accepted = True
+        host_ip, host_port = h['ip'], h['port']
+    return is_accepted, host_ip, host_port
 
 
 class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
     def handle(self):
         try:
+            global total_request, total_reject
+            total_request += 1
             data = self.request.recv(buffer_size)
-            # data: {max.latexy (sec)+' 'workload in byte}
-            print data
+            # data: max.latexy (sec)+','+workload in byte e.g 100,144
+            # TODO: Define msg..
+            data = str(data).strip(' ')
+            data = data.strip(',')
+
+            max_latency = int(data[0])
+
             # cur_thread = threading.current_thread()
             # response = '{}: {}'.format(cur_thread.name, data)
             # logger = logging.getLogger(cur_thread.name)
             logger.debug('recv() from ' + self.client_address[0])
 
-            # TODO: implement algo. of selecting host
-
-            # isblocked, ip, port = select()
-            # [{name:,ip:,port:,cpu:,rtt:,proc:}]
             if not controller_is_ready:
                 raise Exception('Controller is not ready')
 
-            lock_host_list.acquire()
-            try:
-                candidate_host = copy.deepcopy(active_host_list)
-            finally:
-                lock_host_list.release()
-            print candidate_host
-            self.request.sendall(data)
+            candidate_host = []
+            for h in host_threads:
+                if not h.isConnected: continue
+                hh = {'name': h.name, 'ip': h.host,
+                      'port': h.port, 'cpu': h.cpu, 'rtt': h.rtt, 'proc': h.num_of_proc, 'total_latency': None}
+                candidate_host.append(hh)
+
+            is_accepted, selected_ip, selected_port = select_host(policy, candidate_host, max_latency)
+            response = str("Reject,None,None")
+            if is_accepted:
+                response = str("Accept," + selected_ip + "," + str(selected_port))
+            self.request.sendall(response)
+
+            if not is_accepted: total_reject += 1
 
         except Exception as e:
             logger.error('Request error: ' + e.message)
+            total_reject += 1
 
 
 class ControllerThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
@@ -101,11 +181,10 @@ def load_config(config_file):
     return True, config
 
 
-def load_hostlist(host_file):
-    host_list = []
-
+def load_hosts(host_file):
+    hosts = []
     readable, read_data = read_file(host_file)
-    if not readable: return False, host_list
+    if not readable: return False, hosts
 
     try:
         h_list = yaml.load(read_data)
@@ -118,23 +197,25 @@ def load_hostlist(host_file):
             "Error loading host file \'"
             + host_file + "\'" + error_pos
             + ": content format error: Failed to parse yaml format")
-        return False, host_list
+        return False, hosts
 
     for n, h_data in h_list.items():
         try:
-            h = Host(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['host-user'], h_data['host-pwd'])
-        except:
-            logger.error('Cannot add host: ' + h_data['name'])
+            h = Host(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['host-user'], h_data['host-pwd'],
+                     controller_interval)
+            h.start()  # start host threat
+        except Exception as e:
+            logger.error('Cannot add host: ' + h_data['name'] + ': ' + e.message)
             continue
-        host_list.append(h)
+        hosts.append(h)
 
-    return True, host_list
+    return (hosts.__len__() > 0), hosts
 
 
 def update_host():
     list = []
-    for h in host_list:
-        h.update()
+    for h in host_threads:
+        # h.update()
         if not h.isConnected: continue
         hh = {'name': h.name, 'ip': h.host,
               'port': h.port, 'cpu': h.cpu, 'rtt': h.rtt, 'proc': h.num_of_proc}
@@ -190,9 +271,10 @@ if __name__ == "__main__":
     # Create host list
     logger.info('Connecting host(s)...')
     host_file = 'host_file.yaml'
-    host_is_ok, host_list = load_hostlist(host_file)
+    host_is_ok, host_threads = load_hosts(host_file)
     if not host_is_ok:
         logger.warning('No host is running')
+
     time.sleep(1)
 
     logger.debug('Start sever_thread waiting requests for sources')
@@ -211,31 +293,35 @@ if __name__ == "__main__":
         active_host_list = copy.copy(temp_host_list)
     finally:
         lock_host_list.release()
-    print active_host_list
+
     controller_is_ready = True
     logger.info('Controller is ready')
+    sys.stdout.flush()
 
     try:
         while True:
-            time.sleep(_controller_interval)
+            pass
+            '''time.sleep(controller_interval)
             logger.info('Update host(s)')
             temp_host_list = update_host()
             lock_host_list.acquire()
             try:
                 active_host_list = copy.copy(temp_host_list)
             finally:
-                lock_host_list.release()
+                lock_host_list.release()'''
     except (KeyboardInterrupt, SystemExit):
         pass
 
     logger.info('Disconnecting host(s)...')
     controller_is_ready = False
-    for h in host_list:
-        h.close()
+
+    for h in host_threads:
+        h.terminate()
+        h.join()
 
     logger.debug('Shut down a server')
     server.shutdown()
     server.server_close()
-
+    print total_reject, total_request
     logger.info('Exit')
     exit()

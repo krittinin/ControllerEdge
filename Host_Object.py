@@ -5,28 +5,34 @@ import re
 from platform import system
 import time
 import logging
+import threading
 
 
 # TODO: one thread per host
 
-class Host():
-    def __init__(self, host_name, host_ip, server_port, user, password):
-        self.name = host_name
+class Host(threading.Thread):
+    def __init__(self, host_name, host_ip, server_port, user, password, interval):
+        threading.Thread.__init__(self)
+        self.host_name = host_name
         self.host = host_ip
         self.port = server_port
         self.rtt = 0
         self.cpu = None
         self.mem = None
+        self.num_of_proc = None
+
+        self.update_interval = interval
         self.last_update = None
         self.user = user
         self.password = password
         self.ssh_con = None
         self.isConnected = False
-        self.num_of_proc = None
+        self.isRun = False
 
         global logger
-        logger = logging.getLogger('Host')
+        logger = logging.getLogger('Host ')
         self.ssh_connect()
+
         # if self.isConnected:
         #    self.update()
 
@@ -39,10 +45,10 @@ class Host():
             self.ssh_con.connect(self.host, username=self.user, password=self.password, timeout=10)  # , None)
             self.isConnected = True
         except paramiko.ssh_exception.SSHException as e:
-            logger.error(self.host + ": ssh_connect ssh Exception:", e.message)
+            logger.error(self.host_name + ": ssh_connect ssh Exception:", e.message)
             self.isConnected = False
         except:
-            logger.error(self.host + ": connection fail")
+            logger.error(self.host_name + ": connection fail")
 
     def close(self):
         self.isConnected = False
@@ -54,19 +60,20 @@ class Host():
         ping to host for get avg_rtt
         :return: avg_rtt of ping if not succeed, return MAX_INT
         '''
+        # TODO: PING from source not host T^T
 
         ping_result = None
-        avg_rtt = maxint
+        avg_rtt = 0
 
         try:
-            if system().lower() == 'windows':
-                # for windows
-                ping_out = subprocess.check_output(
-                    ['ping', self.host, '-n', str(count), '-l', str(pck_size), '-w', str(timeout * 1000)]).splitlines()
-            else:
-                # for else assume linux
-                ping_out = subprocess.check_output(
-                    ['ping', self.host, '-c', str(count), '-s', str(pck_size), '-W', str(timeout)]).splitlines()
+            # if system().lower() == 'windows':
+            #    # for windows
+            #    ping_out = subprocess.check_output(
+            #        ['ping', self.host, '-n', str(count), '-l', str(pck_size), '-w', str(timeout * 1000)]).splitlines()
+            # else:
+            # for else assume linux
+            ping_out = subprocess.check_output(
+                ['ping', self.host, '-c', str(count), '-s', str(pck_size), '-W', str(timeout)]).splitlines()
 
             len_ping = len(ping_out)
 
@@ -82,14 +89,14 @@ class Host():
                 # print ping_result
                 _INDEX_AVG_RTT = 7
                 avg_rtt = float(ping_result[_INDEX_AVG_RTT])
-                # TODO: windows ping
+
 
         except subprocess.CalledProcessError as e:
-            logger.error(self.host + ': CalledProcessError: ' + e.message)
+            logger.error(self.host_name + ': CalledProcessError: ' + e.message)
         except ValueError:
-            logger.error(self.host + ': ValueError: ' + 'check ping result format')
+            logger.error(self.host_name + ': ValueError: ' + 'check ping result format')
         except Exception as e:
-            logger.error(self.host + ': Unknown error: ' + e.message)
+            logger.error(self.host_name + ': Unknown error: ' + e.message)
         finally:
             return avg_rtt
 
@@ -120,10 +127,10 @@ class Host():
                 cpu_idle = int(vmstat_result[14])
 
             except paramiko.ssh_exception.SSHException as e:
-                logger.error(self.host + ': ssh_connect ssh Exception:', e.message)
+                logger.error(self.host_name + ': ssh_connect ssh Exception:', e.message)
                 self.ssh_connect()
             except ValueError:
-                logger.error(self.host + ': Value error: vmstat not in defined format')
+                logger.error(self.host_name + ': Value error: vmstat not in defined format')
 
         return free_mem, cpu_idle
 
@@ -148,15 +155,15 @@ class Host():
                 process_count = int(pc_result[0])
 
             except paramiko.ssh_exception.SSHException as e:
-                logger.error(self.host + ': ssh_connect ssh Exception:', e.message)
+                logger.error(self.host_name + ': ssh_connect ssh Exception:', e.message)
                 self.ssh_connect()
             except ValueError:
-                logger.error(self.host + ': Value error: \'pc aux\' not in defined format')
+                logger.error(self.host_name + ': Value error: \'pc aux\' not in defined format')
 
             return process_count
 
     def update(self):
-        logger.debug(self.host + ': updated')
+        logger.debug(self.host_name + ': updated')
         self.last_update = time.localtime()
 
         if not self.isConnected:
@@ -167,3 +174,13 @@ class Host():
             self.num_of_proc = self.pc_count()
 
             # print self.host, self.mem, self.cpu, self.rtt
+
+    def run(self):
+        self.isRun = True
+        while self.isRun:
+            self.update()
+            time.sleep(self.update_interval)
+        self.close()
+
+    def terminate(self):
+        self.isRun = False
