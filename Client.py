@@ -45,9 +45,11 @@ th1.start()
 th2.start()
 time.sleep(2)
 th3.start()
+'''
 for i in range(2):
     th1.run()
     # time.sleep()
     th2.run()
     time.sleep(2)
     th3.run()
+    '''

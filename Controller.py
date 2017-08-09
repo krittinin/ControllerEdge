@@ -29,15 +29,15 @@ total_request, total_reject = 0, 0
 # logging.basicConfig(level=logging.ERROR, format='%(name)s: %(message)s')
 
 buffer_size = 1024
-controller_interval = 10  # second
-policy = 2  # 1: random, 2: lowest latency
+controller_interval = 20  # second
+policy = 1  # 1: random, 2: lowest latency
 
 
 def calculate_commp_latency(host):
-    ttl = 0
-    factor = 0
+    ttl = 1
+    factor = 1
     # TODO: find a way to cal it....
-    ttl = host['cpu'] / host['proc'] * factor
+    # ttl = host['cpu'] / host['proc'] * factor
     return ttl
 
 
@@ -47,9 +47,11 @@ def check_constrain(active_host, max_latency):
     candidate_hosts = []
     # get total_latncy for each host
     for host in active_host:
-        host['total_latency'] = host['rtt'] + calculate_commp_latency(host)
+        commu, comp = host['rtt'], calculate_commp_latency(host)
+        if commu == 0 or comp == 0: continue
+
+        host['total_latency'] = commu + comp
         # check 1: new wk not grater max.latency
-        print host['total_latency']
         if 0 < host['total_latency'] <= max_latency:
             candidate_hosts.append(host)
             # ckeck others are ok
@@ -105,7 +107,7 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             # data: max.latexy (sec)+','+workload in byte e.g 100,144
             # TODO: Define msg..
             data = str(data).strip(' ')
-            data = data.strip(',')
+            data = data.split(',')
 
             max_latency = int(data[0])
 
@@ -121,7 +123,8 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             for h in host_threads:
                 if not h.isConnected: continue
                 hh = {'name': h.name, 'ip': h.host,
-                      'port': h.port, 'cpu': h.cpu, 'rtt': h.rtt, 'proc': h.num_of_proc, 'total_latency': None}
+                      'port': h.port, 'cpu': h.cpu, 'rtt': h.get_source_rtt(self.client_address[0]),
+                      'proc': h.num_of_proc, 'total_latency': None}
                 candidate_host.append(hh)
 
             is_accepted, selected_ip, selected_port = select_host(policy, candidate_host, max_latency)
@@ -322,6 +325,6 @@ if __name__ == "__main__":
     logger.debug('Shut down a server')
     server.shutdown()
     server.server_close()
-    print total_reject, total_request
+    print "total reject=", total_reject, ", total=", total_request
     logger.info('Exit')
     exit()
