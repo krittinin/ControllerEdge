@@ -8,7 +8,8 @@ import logging
 
 
 class HostInfo():
-    def __init__(self, host_ip, user, password):
+    def __init__(self, host_name, host_ip, user, password):
+        self.name = host_name
         self.host = host_ip
         self.rtt = 0
         self.cpu = None
@@ -22,8 +23,9 @@ class HostInfo():
 
         global logger
         logger = logging.getLogger('Host')
-
-        self.update()
+        self.ssh_connect()
+        if self.status:
+            self.update()
 
     def ssh_connect(self):
         try:
@@ -36,6 +38,8 @@ class HostInfo():
         except paramiko.ssh_exception.SSHException as e:
             logger.error(self.host + ": ssh_connect ssh Exception:", e.message)
             self.status = False
+        except:
+            logger.error(self.host + ": connection fail")
 
     def close(self):
         self.status = False
