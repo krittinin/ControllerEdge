@@ -1,4 +1,5 @@
 import socket
+import sys
 
 buffer_size = 1024
 
@@ -17,5 +18,10 @@ def client_action(ip, port, message):
         sock.close()
 
 
-message = "Hello from client"
+a = ['123456789', '123456789', '123456789',
+     '123456789', '123456789', '123456789',
+     '123456789', '123456789', '123456789']
+max_latency = 100  # ms
+message = str(max_latency) + ',' + str(sys.getsizeof(a))
+print str(message)
 client_action(_serverAddress, _port, message)

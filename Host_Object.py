@@ -7,10 +7,13 @@ import time
 import logging
 
 
-class HostInfo():
-    def __init__(self, host_name, host_ip, user, password):
+# TODO: one thread per host
+
+class Host():
+    def __init__(self, host_name, host_ip, server_port, user, password):
         self.name = host_name
         self.host = host_ip
+        self.port = server_port
         self.rtt = 0
         self.cpu = None
         self.mem = None
@@ -18,14 +21,14 @@ class HostInfo():
         self.user = user
         self.password = password
         self.ssh_con = None
-        self.status = False
+        self.isConnected = False
         self.num_of_proc = None
 
         global logger
         logger = logging.getLogger('Host')
         self.ssh_connect()
-        if self.status:
-            self.update()
+        # if self.isConnected:
+        #    self.update()
 
     def ssh_connect(self):
         try:
@@ -34,19 +37,19 @@ class HostInfo():
             self.ssh_con.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self.ssh_con.load_system_host_keys()
             self.ssh_con.connect(self.host, username=self.user, password=self.password, timeout=10)  # , None)
-            self.status = True
+            self.isConnected = True
         except paramiko.ssh_exception.SSHException as e:
             logger.error(self.host + ": ssh_connect ssh Exception:", e.message)
-            self.status = False
+            self.isConnected = False
         except:
             logger.error(self.host + ": connection fail")
 
     def close(self):
-        self.status = False
+        self.isConnected = False
         self.ssh_con.close()
         logger.debug(self.host + ': closed')
 
-    def ping(self, count=2, timeout=2, pck_size=1024):
+    def ping(self, count=3, timeout=2, pck_size=1024):
         '''
         ping to host for get avg_rtt
         :return: avg_rtt of ping if not succeed, return MAX_INT
@@ -93,10 +96,10 @@ class HostInfo():
     def vmstat(self):
         # find free mem and idle cpu
         free_mem, cpu_idle = None, None
-        if not self.status:
+        if not self.isConnected:
             self.ssh_connect()
 
-        if self.status:
+        if self.isConnected:
             try:
                 command = "vmstat 2 2"
                 _, stdout, stderr = self.ssh_con.exec_command(command)
@@ -122,15 +125,15 @@ class HostInfo():
             except ValueError:
                 logger.error(self.host + ': Value error: vmstat not in defined format')
 
-            return free_mem, cpu_idle
+        return free_mem, cpu_idle
 
     def pc_count(self):
         # ps aux | wc -l
         process_count = None
-        if not self.status:
+        if not self.isConnected:
             self.ssh_connect()
 
-        if self.status:
+        if self.isConnected:
             try:
                 command = "ps aux | wc -l"
                 _, stdout, stderr = self.ssh_con.exec_command(command)
@@ -155,8 +158,12 @@ class HostInfo():
     def update(self):
         logger.debug(self.host + ': updated')
         self.last_update = time.localtime()
-        self.mem, self.cpu = self.vmstat()
-        self.rtt = self.ping(count=4)
-        self.num_of_proc = self.pc_count()
 
-        # print self.host, self.mem, self.cpu, self.rtt
+        if not self.isConnected:
+            self.ssh_connect()
+        if self.isConnected:
+            self.mem, self.cpu = self.vmstat()
+            self.rtt = self.ping(count=4)
+            self.num_of_proc = self.pc_count()
+
+            # print self.host, self.mem, self.cpu, self.rtt
