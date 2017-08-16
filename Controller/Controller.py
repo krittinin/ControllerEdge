@@ -23,16 +23,19 @@ controller_is_ready = False
 global total_request, total_reject
 total_request, total_reject = 0, 0
 
-# global condition
-# condition = threading.Condition()
+# Constant variables
+ERR_MSG = 'Error'
+ACPT_MSG = 'Accept'
+REJ_MSG = 'Reject'
 
-# logging.basicConfig(level=logging.ERROR, format='%(name)s: %(message)s')
+SEPERATOR = ','
+
+RANDOM_POLICY = 0
+LOW_LATENCY_POLICY = 1
 
 buffer_size = 1024
 controller_interval = 20  # second
-policy = 1  # 1: random, 2: lowest latency
-
-max_proc = 1000
+policy = RANDOM_POLICY
 
 
 def calculate_commp_latency(host):
@@ -53,6 +56,7 @@ def check_constrain(active_host, max_latency):
         if commu == 0 or comp == 0: continue
 
         host['total_latency'] = commu + comp
+
         # check 1: new wk not grater max.latency
         if 0 < host['total_latency'] <= max_latency:
             candidate_hosts.append(host)
@@ -67,9 +71,9 @@ def select_host(policy, active_host, max_latency):
 
     candidate_hosts = check_constrain(active_host, max_latency)
 
-    if policy == 1:
+    if policy == RANDOM_POLICY:
         is_accepted, host_ip, host_port = select_random(candidate_hosts)
-    elif policy == 2:
+    elif policy == LOW_LATENCY_POLICY:
         is_accepted, host_ip, host_port = select_low_latency(candidate_hosts)
     return is_accepted, host_ip, host_port
 
@@ -107,20 +111,18 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             global total_request, total_reject
             total_request += 1
             data = self.request.recv(buffer_size)
-            # data: max.latexy (sec)+','+workload in byte e.g 100,144
-            # TODO: Define msg..
+
+            # data = id,max_latency,size_of_puzzle
             data = str(data).strip(' ')
-            data = data.split(',')
+            data = data.split(SEPERATOR)
 
-            max_latency = int(data[0])
-
-            # cur_thread = threading.current_thread()
-            # response = '{}: {}'.format(cur_thread.name, data)
-            # logger = logging.getLogger(cur_thread.name)
-            logger.debug('recv() from ' + self.client_address[0])
+            logger.debug('recv() ' + str(data) + ' from ' + self.client_address[0])
 
             if not controller_is_ready:
                 raise Exception('Controller is not ready')
+
+            work_id = int(data[0])
+            max_latency = float(data[1])
 
             candidate_host = []
             for h in host_threads:
@@ -131,11 +133,12 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                 candidate_host.append(hh)
 
             is_accepted, selected_ip, selected_port = select_host(policy, candidate_host, max_latency)
-            response = str("Reject,None,None")
+            response = REJ_MSG + SEPERATOR + str(work_id) + SEPERATOR + "None" + SEPERATOR + "0"
             if is_accepted:
-                response = str("Accept," + selected_ip + "," + str(selected_port))
+                response = str(
+                    ACPT_MSG + SEPERATOR + str(work_id) + SEPERATOR + selected_ip + SEPERATOR + str(selected_port))
+            logger.debug(response)
             self.request.sendall(response)
-            # print response
             if not is_accepted: total_reject += 1
 
         except Exception as e:
@@ -232,10 +235,7 @@ def update_host():
 
 # TODO: send API to openvim to look up host
 
-
-
 # TODO: list and find IP of VM in host
-
 
 if __name__ == "__main__":
 
@@ -265,15 +265,24 @@ if __name__ == "__main__":
     if not config_is_ok:
         logger.err('load config fail!! exit the controller')
         exit(1)
-    # print config['controller_ip'], config['controller_port']
 
     console.setLevel(getattr(logging, config['console_log_level']))
     logger.setLevel(getattr(logging, config['file_log_level']))
 
-    # Port 0 means to select an arbitrary unused port
-    # HOST, PORT = "localhost", 0
-    # HOST = _serverAddress
-    # PORT = _port
+    # ---------------Initial parameter-----------------
+    # policy: RANDOM=0, LOW.LATENCY=1
+    # controller_interval: update period [second]
+    try:
+        assert len(sys.argv) == 2 + 1, 'Please insert correct parameters'
+        policy = int(sys.argv[1])
+        assert policy == RANDOM_POLICY or policy == LOW_LATENCY_POLICY, 'Policy must be ' + str(
+            RANDOM_POLICY) + 'or' + str(LOW_LATENCY_POLICY)
+        controller_interval = float(sys.argv[2])  # [sec]
+        assert controller_interval > 0, 'Please insert correct parameters'
+    except Exception as e:
+        logger.error('Parameter error: ' + e.message)
+        exit(1)
+    # ---------------Finish initialinging parameter-----------------
 
     # Create host list
     logger.info('Connecting host(s)...')
@@ -308,14 +317,6 @@ if __name__ == "__main__":
     try:
         while True:
             pass
-            '''time.sleep(controller_interval)
-            logger.info('Update host(s)')
-            temp_host_list = update_host()
-            lock_host_list.acquire()
-            try:
-                active_host_list = copy.copy(temp_host_list)
-            finally:
-                lock_host_list.release()'''
     except (KeyboardInterrupt, SystemExit):
         pass
 
