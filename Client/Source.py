@@ -10,9 +10,8 @@ import sudoku
 import logging
 import os
 import re
-import Queue
 
-max_latency = 2  # second
+max_latency = 1.5  # second
 
 total_request = 0
 total_reject = 0
@@ -95,13 +94,14 @@ def send_message(host, port, message):
     return str(response)
 
 
-def get_server_from_ctrl(max_latency, puzzle, controller_ip, controller_port):
-    ask_msg = str(max_latency) + ',' + str(sys.getsizeof(puzzle))
+def get_server_from_ctrl(max_latency, work_id, puzzle, controller_ip, controller_port):
+    # ask_msg = id,max_latency,size-of_puzzle
+    ask_msg = str(work_id) + SEPERATOR + str(max_latency) + SEPERATOR + str(sys.getsizeof(puzzle))
     ctrl_rep = send_message(controller_ip, controller_port, ask_msg)
-    ctrl_rep = re.split(',', ctrl_rep)
+    ctrl_rep = re.split(SEPERATOR, ctrl_rep)
     # ctrl_rep = [Accept, work_id, edge_ip, edge_port]
     if len(ctrl_rep) != 4:
-        ctrl_rep = [ERR_MSG, '', '', '']
+        ctrl_rep = [ERR_MSG, work_id, '', '', '']
         logger.error("Controller response error")
     return ctrl_rep[0], ctrl_rep[1], ctrl_rep[2], ctrl_rep[3]
 
@@ -123,7 +123,9 @@ class sourceThread(threading.Thread):
         puzzle = str(self.thread_id) + SEPERATOR + puzzle.strip()
 
         if not self.test_mode:
-            accept, wk_id, server_ip, server_port = get_server_from_ctrl(max_latency=self.max_latency, puzzle=puzzle,
+            accept, wk_id, server_ip, server_port = get_server_from_ctrl(max_latency=self.max_latency,
+                                                                         work_id=self.thread_id,
+                                                                         puzzle=puzzle,
                                                                          controller_ip=self.ctrl_ip,
                                                                          controller_port=self.ctrl_port)
             server_port = int(server_port)
@@ -144,7 +146,7 @@ class sourceThread(threading.Thread):
             solved_puzzle = solved_puzzle.split(SEPERATOR)
             # print solved_puzzle[0] + '=\n' + solved_puzzle[1]
             diff_t = t2 - t1
-            logger.debug('wk' + str(self.thread_id) + "," + str(diff_t))
+            logger.debug('Done workload_' + str(self.thread_id) + SEPERATOR + str(diff_t))
             if diff_t > self.max_latency or solved_puzzle == ERR_MSG:
                 is_error = True
 
@@ -167,6 +169,7 @@ class sourceThread(threading.Thread):
 
 
 if __name__ == "__main__":
+    # --------------Load configuration---------------
     config_file = 'source.cfg'
     config_is_ok, config = load_config(config_file)
     if not config_is_ok:
@@ -177,6 +180,21 @@ if __name__ == "__main__":
 
     controller_ip = str(config['controller_ip'])
     controller_port = int(config['controller_port'])
+    # --------------Finish configuration---------------
+
+    # ---------------Initial parameter-----------------
+    # max_latency, num_of_workloads, work_rate
+    len_arg = len(sys.argv)
+    try:
+        assert len(sys.argv) == 3 + 1, 'Please insert correct parameters'
+        max_latency = float(sys.argv[1])
+        num_of_workloads = int(sys.argv[2])
+        wk_rate = float(sys.argv[3])  # per second
+        assert max_latency > 0 and num_of_workloads >= 0 and wk_rate > 0, 'Please insert correct parameters'
+    except Exception as e:
+        logger.error('Parameter error: ' + e.message)
+        exit(1)
+    # ---------------Finish initialinging parameter-----------------
 
     puzzle_size = int(config['puzzle_size'])
     mode = config['mode']
@@ -187,20 +205,19 @@ if __name__ == "__main__":
     server_ip = config['default_server_ip']
     server_port = config['default_server_port']
 
-    wk_rate = 0.1  # per second
     # server_ip, server_port = '131.112.21.86', 12541
 
     threads = collections.deque(maxlen=100)
 
     try:
-        for i in range(2):
+        for i in range(num_of_workloads):
             client = sourceThread(i, controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
                                   mode)
             client.daemon = True
             client.start()
             threads.append(client)
             next_workload = random.expovariate(wk_rate)  # as poisson process
-            logger.debug('next workload: ' + str(next_workload))
+            logger.debug('workload_' + str(i + 1) + ': ' + str(next_workload))
             time.sleep(next_workload)
 
     except KeyboardInterrupt, SystemExit:
