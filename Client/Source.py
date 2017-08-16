@@ -18,12 +18,21 @@ total_request = 0
 total_reject = 0
 total_error = 0
 buffer_size = 1024
+socket_timeout = 15
 
 streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
 logging.basicConfig(level=logging.DEBUG,
                     format=streamformat)
 
 logger = logging.getLogger("Source")
+
+# Constant variables
+ERR_MSG = 'Error'
+ACPT_MSG = 'Accept'
+REJ_MSG = 'Reject'
+TEST_MODE = 'test'
+
+SEPERATOR = ','
 
 lock = threading.Condition()
 flag_condition = True
@@ -68,17 +77,20 @@ def load_config(config_file):
 
 
 def send_message(host, port, message):
-    response = "Error"
+    response = ERR_MSG
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((host, port))
+        sock.settimeout(60)
         try:
             sock.sendall(message)
             response = sock.recv(buffer_size)
         finally:
             sock.close()
-    except:
-        logger.error("Socket error " + host, port)
+    except socket.timeout:
+        logger.error("Socket timeout " + host, port)
+    except socket.error as e:
+        logger.error("Socket error " + host + ": " + e.message)
 
     return str(response)
 
@@ -87,44 +99,57 @@ def get_server_from_ctrl(max_latency, puzzle, controller_ip, controller_port):
     ask_msg = str(max_latency) + ',' + str(sys.getsizeof(puzzle))
     ctrl_rep = send_message(controller_ip, controller_port, ask_msg)
     ctrl_rep = re.split(',', ctrl_rep)
-    if len(ctrl_rep) != 3:
-        ctrl_rep = {"Error", None, None}
+    # ctrl_rep = [Accept, work_id, edge_ip, edge_port]
+    if len(ctrl_rep) != 4:
+        ctrl_rep = [ERR_MSG, '', '', '']
         logger.error("Controller response error")
-    return ctrl_rep[0], ctrl_rep[1], ctrl_rep[2]
+    return ctrl_rep[0], ctrl_rep[1], ctrl_rep[2], ctrl_rep[3]
 
 
 class sourceThread(threading.Thread):
-    def __init__(self, cip, cport, d_sip, d_sport, pzzsize, maxL, mode):
+    def __init__(self, id, cip, cport, d_sip, d_sport, pzzsize, maxlatency, mmode):
         threading.Thread.__init__(self)
+        self.thread_id = id
         self.ctrl_ip = cip
         self.ctrl_port = cport
         self.default_server = d_sip
         self.default_server_port = d_sport
-        self.max_latency = maxL
+        self.max_latency = maxlatency
         self.puzzle_size = pzzsize
-        self.test_mode = mode == 'test'  # (m == 'test')
+        self.test_mode = mmode == TEST_MODE  # (m == 'test')
 
     def run(self):
         puzzle = sudoku.make_puzzle(self.puzzle_size)  # get a sudoku puzzzle
-        if not self.test_mode:
-            accept, server_ip, server_port = get_server_from_ctrl(max_latency=self.max_latency, puzzle=puzzle,
-                                                                  controller_ip=self.ctrl_ip,
-                                                                  controller_port=self.ctrl_port)
-        else:
-            accept, server_ip, server_port = "Accept", self.default_server, self.default_server_port
-            is_reject, is_error = False, False
+        puzzle = str(self.thread_id) + SEPERATOR + puzzle.strip()
 
-        if accept == "Reject":
+        if not self.test_mode:
+            accept, wk_id, server_ip, server_port = get_server_from_ctrl(max_latency=self.max_latency, puzzle=puzzle,
+                                                                         controller_ip=self.ctrl_ip,
+                                                                         controller_port=self.ctrl_port)
+            server_port = int(server_port)
+            wk_id = int(wk_id)
+        else:
+            accept, wk_id, server_ip, server_port = ACPT_MSG, self.thread_id, self.default_server, self.default_server_port
+
+        is_reject, is_error = False, False
+
+        logger.debug(accept + ",wk" + str(wk_id) + "," + str(server_ip) + "," + str(server_port))
+
+        if accept == REJ_MSG:
             is_reject = True
-        elif accept == "Accept":
+        elif accept == ACPT_MSG:
             t1 = time.time()
             solved_puzzle = send_message(server_ip, server_port, str(puzzle))
             t2 = time.time()
-            print threading.current_thread(), t2 - t1
-            if t2 - t1 > self.max_latency:
+            solved_puzzle = solved_puzzle.split(SEPERATOR)
+            # print solved_puzzle[0] + '=\n' + solved_puzzle[1]
+            diff_t = t2 - t1
+            logger.debug('wk' + str(self.thread_id) + "," + str(diff_t))
+            if diff_t > self.max_latency or solved_puzzle == ERR_MSG:
                 is_error = True
 
         global total_request, total_reject, total_error, flag_condition
+
         lock.acquire()
         if flag_condition:
             flag_condition = False
@@ -156,20 +181,20 @@ if __name__ == "__main__":
     puzzle_size = int(config['puzzle_size'])
     mode = config['mode']
     is_test_mode = False
-    if mode == 'test':
+    if mode == TEST_MODE:
         is_test_mode = True
 
     server_ip = config['default_server_ip']
     server_port = config['default_server_port']
 
-    wk_rate = 0.09  # per second
+    wk_rate = 0.1  # per second
     # server_ip, server_port = '131.112.21.86', 12541
 
     threads = collections.deque(maxlen=100)
 
     try:
         for i in range(2):
-            client = sourceThread(controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
+            client = sourceThread(i, controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
                                   mode)
             client.daemon = True
             client.start()
@@ -185,5 +210,8 @@ if __name__ == "__main__":
     for c in threads:
         c.join()
 
-    print total_request, total_reject, total_error
+    print "total request:", total_request
+    print "total rejection:", total_reject
+    print "total error", total_error
+    print 'Exit source'
     exit()
