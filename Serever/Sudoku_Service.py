@@ -5,15 +5,18 @@ import yaml
 import sudoku
 import os
 import time
+import sys
 
 buffer_size = 1024
 
-logging.basicConfig(level=logging.DEBUG, format='%(name)s: %(message)s')
+# logging.basicConfig(level=logging.DEBUG, format='%(name)s: %(message)s')
 global total_workload
 total_workload = 0
 
 # Seperated thread for each request
 # Asynchronous_Requests, Fork process when get a new request
+
+SEPERATOR = ','
 
 streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
 logging.basicConfig(level=logging.DEBUG,
@@ -63,13 +66,17 @@ class ProcessTCPRequestHandler(SocketServer.BaseRequestHandler):
     def handle(self):
         data = self.request.recv(buffer_size)
         pid = str(os.getpid())
-        print 'PID' + pid + ': receive message from ' + self.client_address[0]
-        logging.debug('PID' + pid + ': receive message from ' + self.client_address[0])
-        puzzle = str(data).split()
-        # logger.debug('PID'+pid + ': solving a puzzle ')
+        # print 'PID' + pid + ': receive message from ' + self.client_address[0]
+        logger.debug('PID' + pid + ': receive message from ' + self.client_address[0])
+        data = str(data).split(SEPERATOR)
+        wid = data[0]
+        puzzle = data[1]
         solved_puzzle = sudoku.solve(puzzle)
+        solved_puzzle = wid + SEPERATOR + solved_puzzle
         self.request.sendall(solved_puzzle)
-        logging.debug('PID' + pid + ': job is done. send the solution')
+        global total_workload
+        total_workload += 1
+        logger.debug('PID' + pid + ': ' + wid + ' job is done. send the solution')
 
 
 class ProcessTCPServer(SocketServer.ForkingMixIn, SocketServer.TCPServer):
@@ -87,7 +94,14 @@ if __name__ == "__main__":
         logging.error('load config fail!! exit the program')
         exit(1)
     logger = logging.getLogger(config['host_name'])
-    logger.setLevel(getattr(logging, config['console_log_level']))
+    logger.setLevel(getattr(logging, config['file_log_level']))
+
+    console = logging.StreamHandler(stream=sys.stdout)
+    formatter = logging.Formatter(fmt=streamformat)
+    console.setFormatter(formatter)
+    console.setLevel(getattr(logging, config['console_log_level']))
+
+    logger.addHandler(console)
 
     server_ip = config['server_ip']
     server_port = config['server_port']
