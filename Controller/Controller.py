@@ -39,10 +39,10 @@ policy = RANDOM_POLICY
 
 
 def calculate_commp_latency(host):
-    ttl = 1
-    factor = 1
+    ttl = 3.3
+    factor = 0.3
     # TODO: find a way to cal it....
-    # ttl = host['cpu'] / host['proc'] * factor
+    ttl = ttl * host['proc'] * factor
     return ttl
 
 
@@ -66,30 +66,39 @@ def check_constrain(active_host, max_latency):
     return candidate_hosts
 
 
-def select_host(policy, active_host, max_latency):
-    is_accepted, host_ip, host_port = False, None, None
+def select_host(policy, active_hosts, max_latency):
+    is_accepted, host = False, None
 
-    candidate_hosts = check_constrain(active_host, max_latency)
+    candidate_hosts = check_constrain(active_hosts, max_latency)
 
     if policy == RANDOM_POLICY:
-        is_accepted, host_ip, host_port = select_random(candidate_hosts)
+        is_accepted, host = select_random(candidate_hosts)
     elif policy == LOW_LATENCY_POLICY:
-        is_accepted, host_ip, host_port = select_low_latency(candidate_hosts)
-    return is_accepted, host_ip, host_port
+        is_accepted, host = select_low_latency(candidate_hosts)
+    # print host
+    if is_accepted:
+        for h in host_threads:
+            if h.host_name == host['hname']:
+                # print h.num_of_proc
+                h.acceptWorklaod()
+                # print h.host_name, h.num_of_proc
+                break
+
+    return is_accepted, host
 
 
 def select_random(candidate_host):
-    is_accepted, host_ip, host_port = False, None, None
+    is_accepted, host = False, None
     if len(candidate_host) > 0:
         h = random.choice(candidate_host)
-        is_accepted, host_ip, host_port = True, h['ip'], h['port']
-    return is_accepted, host_ip, host_port
+        is_accepted, host = True, h
+    return is_accepted, host
 
 
 def select_low_latency(candidate_host):
-    is_accepted, host_ip, host_port = False, None, None
+    is_accepted, host = False, None
     if len(candidate_host) == 0:
-        return is_accepted, host_ip, host_port
+        return is_accepted, host
     key = 'total_latency'
     min_latency = min(l[key] for l in candidate_host)
     can = []
@@ -101,8 +110,8 @@ def select_low_latency(candidate_host):
     else:
         h = random.choice(can)
         is_accepted = True
-        host_ip, host_port = h['ip'], h['port']
-    return is_accepted, host_ip, host_port
+        host = h
+    return is_accepted, host
 
 
 class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
@@ -113,7 +122,7 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             data = self.request.recv(buffer_size)
 
             # data = id,max_latency,size_of_puzzle
-            data = str(data).strip(' ')
+            data = str(data).strip()
             data = data.split(SEPERATOR)
 
             logger.debug('recv() ' + str(data) + ' from ' + self.client_address[0])
@@ -124,19 +133,21 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
             work_id = int(data[0])
             max_latency = float(data[1])
 
-            candidate_host = []
+            active_hosts = []
             for h in host_threads:
                 if not h.isConnected: continue
-                hh = {'name': h.name, 'ip': h.host,
+                hh = {'hname': h.host_name, 'ip': h.host,
                       'port': h.port, 'cpu': h.cpu, 'rtt': h.get_source_rtt(self.client_address[0]),
                       'proc': h.num_of_proc, 'total_latency': None}
-                candidate_host.append(hh)
-
-            is_accepted, selected_ip, selected_port = select_host(policy, candidate_host, max_latency)
-            response = REJ_MSG + SEPERATOR + str(work_id) + SEPERATOR + "None" + SEPERATOR + "0"
+                active_hosts.append(hh)
+            is_accepted, selected_host = select_host(policy, active_hosts, max_latency)
+            response = REJ_MSG + SEPERATOR + str(work_id) + SEPERATOR + "No_host" + SEPERATOR + "None" + SEPERATOR + "0"
             if is_accepted:
                 response = str(
-                    ACPT_MSG + SEPERATOR + str(work_id) + SEPERATOR + selected_ip + SEPERATOR + str(selected_port))
+                    ACPT_MSG + SEPERATOR + str(work_id) + SEPERATOR + selected_host['hname'] + SEPERATOR +
+                    selected_host[
+                        'ip'] + SEPERATOR + str(
+                        selected_host['port']))
             logger.debug(response)
             self.request.sendall(response)
             if not is_accepted: total_reject += 1
@@ -283,6 +294,9 @@ if __name__ == "__main__":
         logger.error('Parameter error: ' + e.message)
         exit(1)
     # ---------------Finish initialinging parameter-----------------
+
+    pol = 'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE'
+    logger.info(pol + ' policy, ' + 'INTERVAL=' + sys.argv[2])
 
     # Create host list
     logger.info('Connecting host(s)...')

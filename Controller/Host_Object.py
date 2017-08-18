@@ -7,6 +7,8 @@ import time
 import logging
 import threading
 
+SERVICE_NAME = 'Sudoku_Service'
+
 
 class Host(threading.Thread):
     def __init__(self, host_name, host_ip, server_port, user, password, interval):
@@ -202,10 +204,11 @@ class Host(threading.Thread):
 
         if self.isConnected:
             try:
-                command = "ps aux | wc -l"  # show num of all processes
+                command = "ps aux | grep " + SERVICE_NAME + " | grep " + self.user + " | wc -l"  # show num of all processes
+                # command = 'pgrep ' + SERVICE_NAME + ' | wc -l'
                 _, stdout, stderr = self.ssh_con.exec_command(command)
 
-                # 356 --> #of proc
+                # 12 --> #of proc
 
                 string = None
                 for line in stdout.readlines():
@@ -218,7 +221,7 @@ class Host(threading.Thread):
                 logger.error(self.host_name + ': ssh_connect ssh Exception:', e.message)
                 self.ssh_connect()
             except ValueError:
-                logger.error(self.host_name + ': Value error: \'pc aux\' not in defined format')
+                logger.error(self.host_name + ': Value error: \'pgrep\' not in defined format')
 
             return process_count
 
@@ -234,7 +237,10 @@ class Host(threading.Thread):
             self.ping_source_list()
             self.num_of_proc = self.pc_count()
 
-            # print self.host, self.mem, self.cpu, self.rtt
+            # print self.host, self.mem, self.cpu, self.rtt, self.num_of_proc
+
+    def acceptWorklaod(self):
+        self.num_of_proc += 1
 
     def run(self):
         self.isRun = True

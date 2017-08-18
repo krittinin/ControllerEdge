@@ -6,7 +6,7 @@ host1:
   host-pwd: 123qweasd
 host2:
   name: host2
-  host-ip: 131.112.21.80
+  host-ip: 131.112.21.81
   sever-port: 12541
   host-user: host
   host-pwd: 123qweasd

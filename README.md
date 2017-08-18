@@ -1,2 +1,0 @@
-# ControllerEdge
-Do it fast
