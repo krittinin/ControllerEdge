@@ -194,9 +194,8 @@ def load_config(config_file):
             mark = exc.problem_mark
             error_pos = " at position: (%s:%s)" % (mark.line + 1, mark.column + 1)
         logger.error(
-            "Error loading configuration file \'"
-            + config_file + "\'" + error_pos
-            + ": content format error: Failed to parse yaml format")
+            "Error loading configuration file \'{}\' {}:content format error: Failed to parse yaml format".format(
+                config_file, error_pos))
         return False, config
 
     return True, config
@@ -226,7 +225,7 @@ def load_hosts(host_file):
                      controller_interval)
             h.start()  # start host threat
         except Exception as e:
-            logger.error('Cannot add host: ' + h_data['name'] + ': ' + e.message)
+            logger.error('Cannot add host: {}: {}'.format(h_data['name'], e.message))
             continue
         hosts.append(h)
 
@@ -295,8 +294,11 @@ if __name__ == "__main__":
         exit(1)
     # ---------------Finish initialinging parameter-----------------
 
-    pol = 'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE'
-    logger.info(pol + ' policy, ' + 'INTERVAL=' + sys.argv[2])
+    # pol = 'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE'
+    # logger.info(pol + ' policy, ' + 'INTERVAL=' + sys.argv[2])
+    logger.info('{} policy, INTERVAL={}'.format(
+        'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE',
+        sys.argv[2]))
 
     # Create host list
     logger.info('Connecting host(s)...')
@@ -315,7 +317,7 @@ if __name__ == "__main__":
     # Exit the server thread when the main thread terminates
     server_thread.daemon = True
     server_thread.start()
-    logger.debug('Server loop running in thread' + server_thread.name)
+    logger.debug('Server loop running in thread{}'.format(server_thread.name))
 
     temp_host_list = update_host()
     lock_host_list.acquire()
