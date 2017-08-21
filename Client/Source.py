@@ -43,7 +43,7 @@ flag_condition = True
 def read_file(input_file):
     read_data = None
     if not os.path.isfile(input_file):
-        logger.error('cannot find ' + input_file + ' in the directory')
+        logger.error('cannot find {} in the directory'.format(input_file))
         return False, read_data
     try:
         with open(input_file, 'r') as f:
@@ -51,7 +51,7 @@ def read_file(input_file):
             read_data = f.read()
             f.close()
     except:
-        logger.error('cannot read file: ' + input_file)
+        logger.error('cannot read file: {}'.format(input_file))
         return False, read_data
 
     return True, read_data
@@ -69,12 +69,10 @@ def load_config(config_file):
         if hasattr(exc, 'problem_mark'):
             mark = exc.problem_mark
             error_pos = " at position: (%s:%s)" % (mark.line + 1, mark.column + 1)
-        logger.error(
-            "Error loading configuration file \'"
-            + config_file + "\'" + error_pos
-            + ": content format error: Failed to parse yaml format")
+            logger.error(
+                "Error loading configuration file \'{}\' {}:content format error: Failed to parse yaml format".format(
+                    config_file, error_pos))
         return False, config
-
     return True, config
 
 
@@ -152,8 +150,8 @@ class sourceThread(threading.Thread):
 
         is_reject, is_error = False, False
 
-        logger.debug(
-            accept + ", wk_" + str(wk_id) + " by " + str(server_name) + ' (' + str(server_ip) + ")")
+        logger.debug('%s, wk_%d by %s (%s)' % (accept, wk_id, server_name, server_ip))
+        # accept + ", wk_" + str(wk_id) + " by " + str(server_name) + ' (' + str(server_ip) + ")")
 
         if accept == REJ_MSG:
             is_reject = True
@@ -161,7 +159,7 @@ class sourceThread(threading.Thread):
             t1 = time.time()
             solved_puzzle = send_message(server_ip, server_port, str(puzzle))
             t2 = time.time()
-            solved_puzzle = solved_puzzle.split(SEPERATOR)
+            # solved_puzzle = solved_puzzle.split(SEPERATOR)
             # print solved_puzzle[0] + '=\n' + solved_puzzle[1]
             diff_t = t2 - t1
             err = 'OK'
@@ -169,7 +167,8 @@ class sourceThread(threading.Thread):
                 is_error = True
                 err = ERR_MSG
 
-            logger.debug('Done wk_' + str(self.thread_id) + ' ' + SEPERATOR + str(diff_t) + ' seconds, ' + err)
+            # logger.debug('Done wk_' + str(self.thread_id) + ' ' + SEPERATOR + str(diff_t) + ' seconds, ' + err)
+            logger.debug('Done wk_%d, %.5f seconds, %s' % (self.thread_id, diff_t, err))
 
         global total_request, total_reject, total_error, flag_condition
 
@@ -216,7 +215,8 @@ if __name__ == "__main__":
         logger.error('Parameter error: ' + e.message)
         exit(1)
     # ---------------Finish initialinging parameter-----------------
-    logger.info('MAX_LEN=' + sys.argv[1] + ', NUM_OF_WK=' + sys.argv[2] + ', lambda=' + sys.argv[3])
+    logger.info('MAX_LEN={0[1]}, NUM_OF_WK={0[2]}, lambda={0[3]}'.format(sys.argv))
+    # $logger.info('MAX_LEN=' + sys.argv[1] + ', NUM_OF_WK=' + sys.argv[2] + ', lambda=' + sys.argv[3])
 
     puzzle_size = int(config['puzzle_size'])
     mode = config['mode']
@@ -244,8 +244,8 @@ if __name__ == "__main__":
             client.start()
             threads.append(client)
             next_workload = random.expovariate(wk_rate)  # as poisson process
-            logger.debug('Next wk_' + str(i + 1) + ' ' + str(next_workload) + ' seconds')
-            # logger.debug('workload_' + str(i + 1) + ' waits for ' + str(next_workload) + ' seconds')
+            # logger.debug('Next wk_' + str(i + 1) + ' ' + str(next_workload) + ' seconds')
+            logger.debug("Next wk_%d: %.5f seconds" % ((i + 1), next_workload))
             if len(threads) == 100:
                 logger.debug('Threads reach the max size.')
             time.sleep(next_workload)
