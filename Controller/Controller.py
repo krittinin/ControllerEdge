@@ -39,11 +39,14 @@ policy = RANDOM_POLICY
 
 
 def calculate_commp_latency(host):
-    ttl = 3.3
-    factor = 0.3
-    # TODO: find a way to cal it....
-    ttl = ttl * host['proc'] * factor
-    return ttl
+    comp = 3.3
+    # num_core = max. single threads server can run simultaneously
+    # proc = number of current process
+    # num_core > proc ==> server provides full efficiency to wk.
+
+    cpu = host['num_core'] / (host['proc'] + 1) if h['num_core'] <= h['proc'] else 1
+    comp = comp * cpu
+    return comp
 
 
 def check_constrain(active_host, max_latency):
@@ -138,7 +141,7 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                 if not h.isConnected: continue
                 hh = {'hname': h.host_name, 'ip': h.host,
                       'port': h.port, 'cpu': h.cpu, 'rtt': h.get_source_rtt(self.client_address[0]),
-                      'proc': h.num_of_proc, 'total_latency': None}
+                      'proc': h.num_of_proc, 'total_latency': None, 'max_core': h.num_of_core}
                 active_hosts.append(hh)
             is_accepted, selected_host = select_host(policy, active_hosts, max_latency)
             response = REJ_MSG + SEPERATOR + str(work_id) + SEPERATOR + "No_host" + SEPERATOR + "None" + SEPERATOR + "0"
@@ -194,8 +197,9 @@ def load_config(config_file):
             mark = exc.problem_mark
             error_pos = " at position: (%s:%s)" % (mark.line + 1, mark.column + 1)
         logger.error(
-            "Error loading configuration file \'{}\' {}:content format error: Failed to parse yaml format".format(
-                config_file, error_pos))
+            "Error loading configuration file \'"
+            + config_file + "\'" + error_pos
+            + ": content format error: Failed to parse yaml format")
         return False, config
 
     return True, config
@@ -222,10 +226,10 @@ def load_hosts(host_file):
     for n, h_data in h_list.items():
         try:
             h = Host(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['host-user'], h_data['host-pwd'],
-                     controller_interval)
+                     controller_interval, h_data['cpu-core'])
             h.start()  # start host threat
         except Exception as e:
-            logger.error('Cannot add host: {}: {}'.format(h_data['name'], e.message))
+            logger.error('Cannot add host: ' + h_data['name'] + ': ' + e.message)
             continue
         hosts.append(h)
 
@@ -294,11 +298,8 @@ if __name__ == "__main__":
         exit(1)
     # ---------------Finish initialinging parameter-----------------
 
-    # pol = 'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE'
-    # logger.info(pol + ' policy, ' + 'INTERVAL=' + sys.argv[2])
-    logger.info('{} policy, INTERVAL={}'.format(
-        'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE',
-        sys.argv[2]))
+    pol = 'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE'
+    logger.info(pol + ' policy, ' + 'INTERVAL=' + sys.argv[2])
 
     # Create host list
     logger.info('Connecting host(s)...')
@@ -317,7 +318,7 @@ if __name__ == "__main__":
     # Exit the server thread when the main thread terminates
     server_thread.daemon = True
     server_thread.start()
-    logger.debug('Server loop running in thread{}'.format(server_thread.name))
+    logger.debug('Server loop running in thread' + server_thread.name)
 
     temp_host_list = update_host()
     lock_host_list.acquire()
