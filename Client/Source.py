@@ -19,6 +19,7 @@ total_reject = 0
 total_error = 0
 buffer_size = 1024
 socket_timeout = 15
+max_thread_list = 100
 
 streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
 logging.basicConfig(level=logging.DEBUG,
@@ -69,10 +70,11 @@ def load_config(config_file):
         if hasattr(exc, 'problem_mark'):
             mark = exc.problem_mark
             error_pos = " at position: (%s:%s)" % (mark.line + 1, mark.column + 1)
-            logger.error(
-                "Error loading configuration file \'{}\' {}:content format error: Failed to parse yaml format".format(
-                    config_file, error_pos))
+        logger.error(
+            "Error loading configuration file \'{}\' {}:content format error: Failed to parse yaml format".format(
+                config_file, error_pos))
         return False, config
+
     return True, config
 
 
@@ -151,25 +153,20 @@ class sourceThread(threading.Thread):
         is_reject, is_error = False, False
 
         logger.debug('%s, wk_%d by %s (%s)' % (accept, wk_id, server_name, server_ip))
-        # accept + ", wk_" + str(wk_id) + " by " + str(server_name) + ' (' + str(server_ip) + ")")
-
         if accept == REJ_MSG:
             is_reject = True
         elif accept == ACPT_MSG:
             t1 = time.time()
             solved_puzzle = send_message(server_ip, server_port, str(puzzle))
             t2 = time.time()
-            # solved_puzzle = solved_puzzle.split(SEPERATOR)
+            solved_puzzle = solved_puzzle.split(SEPERATOR)
             # print solved_puzzle[0] + '=\n' + solved_puzzle[1]
             diff_t = t2 - t1
             err = 'OK'
             if diff_t > self.max_latency or solved_puzzle == ERR_MSG:
                 is_error = True
                 err = ERR_MSG
-
-            # logger.debug('Done wk_' + str(self.thread_id) + ' ' + SEPERATOR + str(diff_t) + ' seconds, ' + err)
             logger.debug('Done wk_%d, %.5f seconds, %s' % (self.thread_id, diff_t, err))
-
         global total_request, total_reject, total_error, flag_condition
 
         lock.acquire()
@@ -214,9 +211,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error('Parameter error: ' + e.message)
         exit(1)
-    # ---------------Finish initialinging parameter-----------------
+    # ---------------Finish initializing parameter-----------------
     logger.info('MAX_LEN={0[1]}, NUM_OF_WK={0[2]}, lambda={0[3]}'.format(sys.argv))
-    # $logger.info('MAX_LEN=' + sys.argv[1] + ', NUM_OF_WK=' + sys.argv[2] + ', lambda=' + sys.argv[3])
 
     puzzle_size = int(config['puzzle_size'])
     mode = config['mode']
@@ -232,9 +228,7 @@ if __name__ == "__main__":
     server_ip = config['default_server_ip']
     server_port = config['default_server_port']
 
-    # server_ip, server_port = '131.112.21.86', 12541
-
-    threads = collections.deque(maxlen=100)
+    threads = collections.deque(maxlen=max_thread_list)
 
     try:
         for i in range(num_of_workloads):
@@ -244,10 +238,10 @@ if __name__ == "__main__":
             client.start()
             threads.append(client)
             next_workload = random.expovariate(wk_rate)  # as poisson process
-            # logger.debug('Next wk_' + str(i + 1) + ' ' + str(next_workload) + ' seconds')
             logger.debug("Next wk_%d: %.5f seconds" % ((i + 1), next_workload))
-            if len(threads) == 100:
-                logger.debug('Threads reach the max size.')
+
+            if len(threads) >= max_thread_list:
+                logger.warning('Threads reach the max size.')
             time.sleep(next_workload)
 
     except KeyboardInterrupt, SystemExit:
@@ -257,8 +251,8 @@ if __name__ == "__main__":
     for c in threads:
         c.join()
 
-    print "total request:", total_request
-    print "total rejection:", total_reject
-    print "total error", total_error
-    print 'Exit source'
+    print "total requests:", total_request
+    print "total rejections:", total_reject
+    print "total errors:", total_error
+    print 'Source exit'
     exit()
