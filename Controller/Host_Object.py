@@ -11,7 +11,7 @@ SERVICE_NAME = 'Sudoku_Service'
 
 
 class Host(threading.Thread):
-    def __init__(self, host_name, host_ip, server_port, user, password, interval):
+    def __init__(self, host_name, host_ip, server_port, user, password, interval, num_of_cpu):
         threading.Thread.__init__(self)
         self.host_name = host_name
         self.host = host_ip
@@ -20,6 +20,7 @@ class Host(threading.Thread):
         self.cpu = None
         self.mem = None
         self.num_of_proc = None
+        self.num_of_core = num_of_cpu
 
         self.update_interval = interval
         self.last_update = None
