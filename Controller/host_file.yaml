@@ -5,10 +5,12 @@ host1:
   host-user: host
   host-pwd: 123qweasd
   cpu-core: 4
+  avg_ps: 0.0363655421336 #12x12
 host2:
   name: host2
-  host-ip: 131.112.21.81
+  host-ip: 131.112.21.83
   sever-port: 51871
   host-user: host
   host-pwd: 123qweasd
   cpu-core: 1
+  avg_ps: 0.0295858625571 #12x12

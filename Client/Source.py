@@ -37,14 +37,24 @@ SEPERATOR = ','
 
 FILE_EOF = 200
 
+# CTRL_MSG flag
+UPDATE_FLAG = '1'
+ASK_FLAG = '0'
+
 lock = threading.Condition()
 flag_condition = True
 
 
+def check_exist_file(file):
+    if not os.path.isfile(file):
+        logger.error('cannot find {} in the directory'.format(file))
+        return False
+    return True
+
+
 def read_file(input_file):
     read_data = None
-    if not os.path.isfile(input_file):
-        logger.error('cannot find {} in the directory'.format(input_file))
+    if not check_exist_file(input_file):
         return False, read_data
     try:
         with open(input_file, 'r') as f:
@@ -78,7 +88,7 @@ def load_config(config_file):
     return True, config
 
 
-def send_message(host, port, message):
+def send_message(host, port, message, wait_resp=True):
     response = ERR_MSG
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -86,7 +96,10 @@ def send_message(host, port, message):
         sock.settimeout(max_latency * 2)
         try:
             sock.sendall(message)
-            response = sock.recv(buffer_size)
+            if wait_resp:
+                response = sock.recv(buffer_size)
+            else:
+                response = None
         finally:
             sock.close()
     except socket.timeout:
@@ -98,15 +111,26 @@ def send_message(host, port, message):
 
 
 def get_server_from_ctrl(max_latency, work_id, puzzle, controller_ip, controller_port):
-    # ask_msg = id,max_latency,size-of_puzzle
-    ask_msg = str(work_id) + SEPERATOR + str(max_latency) + SEPERATOR + str(sys.getsizeof(puzzle))
+    # ask_msg = ASK_FLAG, id,max_latency,size-of_puzzle
+    ask_msg = ASK_FLAG + SEPERATOR + str(work_id) + SEPERATOR + str(max_latency) + SEPERATOR + str(
+        sys.getsizeof(puzzle))
+
     ctrl_rep = send_message(controller_ip, controller_port, ask_msg)
     ctrl_rep = re.split(SEPERATOR, ctrl_rep)
+
     # ctrl_rep = [Accept, work_id, edge_name, edge_ip, edge_port]
     if len(ctrl_rep) != 5:
         ctrl_rep = [ERR_MSG, work_id, '', '', '', '']
         logger.error("Controller response error")
     return ctrl_rep[0], ctrl_rep[1], ctrl_rep[2], ctrl_rep[3], ctrl_rep[4]
+
+
+def update_time_to_server(commu, comp, host_name, host_ip):
+    # msg = UPDATE_FLAG, host_name, host_ip, commu, comp
+    update_msg = UPDATE_FLAG + SEPERATOR + host_name + SEPERATOR + host_ip + SEPERATOR + str(commu) + SEPERATOR + str(
+        comp)
+    send_message(host=controller_ip, port=controller_port, message=update_msg, wait_resp=False)
+    pass
 
 
 def get_guzzle():
@@ -117,6 +141,30 @@ def get_guzzle():
     else:
         line = sudoku.make_puzzle(puzzle_size)
     return line
+
+
+def send_pluzzle_to_server(server_ip, server_port, puzzle):
+    status, wk_id, solved_puzzle, arrive_time, finish_time = ERR_MSG, -1, '', 0, 0
+
+    resp = send_message(server_ip, server_port, puzzle)
+
+    if resp != ERR_MSG:
+        # reply_msg = [arrive_time, finish_time, work_id, solution]
+        resp = resp.split(SEPERATOR)
+        if len(resp) == 4:
+            try:
+                status = 'OK'
+                arrive_time = float(resp[0])
+                finish_time = float(resp[1])
+                wk_id = int(resp[2])
+                solved_puzzle = resp[3]
+            except ValueError:
+                logger.error('Cannot get values from reply msg: ' + str(resp))
+                status, wk_id, solved_puzzle, arrive_time, finish_time = ERR_MSG, -1, '', 0, 0
+        else:
+            logger.error('Reply message error: ' + str(resp))
+
+    return status, wk_id, solved_puzzle, arrive_time, finish_time
 
 
 class sourceThread(threading.Thread):
@@ -152,23 +200,30 @@ class sourceThread(threading.Thread):
 
         is_reject, is_error = False, False
 
-        logger.debug('%s, wk_%d by %s (%s)' % (accept, wk_id, server_name, server_ip))
-        if accept == REJ_MSG:
+        logger.debug('%s, wk_%d by %s (%s)' % (accept, int(wk_id), server_name, server_ip))
+        if accept == ERR_MSG:
+            is_error = True
+        elif accept == REJ_MSG:
             is_reject = True
         elif accept == ACPT_MSG:
-            t1 = time.time()
-            solved_puzzle = send_message(server_ip, server_port, str(puzzle))
-            t2 = time.time()
-            solved_puzzle = solved_puzzle.split(SEPERATOR)
-            # print solved_puzzle[0] + '=\n' + solved_puzzle[1]
-            diff_t = t2 - t1
-            err = 'OK'
-            if diff_t > self.max_latency or solved_puzzle == ERR_MSG:
+            send_time = time.time()
+            # solved_puzzle = send_message(server_ip, server_port, str(puzzle))
+            err, wid, solved_puzzle, arrive_time, finish_time = send_pluzzle_to_server(server_ip, server_port, puzzle)
+            receive_time = time.time()
+            # solved_puzzle = solved_puzzle.split(SEPERATOR)
+            total_latency = receive_time - send_time
+            if err != ERR_MSG:
+                # total_latency = receive_time - send_time
+                compu_latency = finish_time - arrive_time
+                commu_latency = total_latency - compu_latency
+                update_time_to_server(commu_latency, compu_latency, server_name, server_ip)
+                print 'total = %5fs, commu = %5fs, compu = %5fs' % (total_latency, commu_latency, compu_latency)
+            if total_latency > self.max_latency or err == ERR_MSG:
                 is_error = True
-                err = ERR_MSG
-            logger.debug('Done wk_%d, %.5f seconds, %s' % (self.thread_id, diff_t, err))
-        global total_request, total_reject, total_error, flag_condition
 
+            logger.debug('Done wk_%d, %.5f seconds, %s' % (self.thread_id, total_latency, err))
+
+        global total_request, total_reject, total_error, flag_condition
         lock.acquire()
         if flag_condition:
             flag_condition = False
@@ -207,7 +262,9 @@ if __name__ == "__main__":
         max_latency = float(sys.argv[1])
         num_of_workloads = int(sys.argv[2])
         wk_rate = float(sys.argv[3])  # per second
-        assert max_latency > 0 and num_of_workloads >= 0 and wk_rate > 0, 'Please insert correct parameters'
+        assert max_latency > 0 and num_of_workloads >= 0 and wk_rate > 0, 'Please insert correct parameters: ' \
+                                                                          'max_latency, num_of_workloads, work_rate'
+
     except Exception as e:
         logger.error('Parameter error: ' + e.message)
         exit(1)
@@ -218,12 +275,18 @@ if __name__ == "__main__":
     mode = config['mode']
     puzzle_mode = config['puzzle_mode']
     puzzle_file = config['puzzle_file']
+    if not check_exist_file(puzzle_file):
+        puzzle_mode = 'generator'
+        logger.warning('{} not exist, change to generator mode'.format(puzzle_file))
+    else:
+        # -----get file eof--------
+        with open(puzzle_file) as f:
+            FILE_EOF = sum(1 for _ in f)
+
     if mode == 'test': logger.warning('Test mode')
     if puzzle_mode == 'generator': logger.warning('Use puzzle generator, may delay the program')
 
-    is_test_mode = False
-    if mode == TEST_MODE:
-        is_test_mode = True
+    is_test_mode = (mode == TEST_MODE)
 
     server_ip = config['default_server_ip']
     server_port = config['default_server_port']

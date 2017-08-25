@@ -9,9 +9,20 @@ import threading
 
 SERVICE_NAME = 'Sudoku_Service'
 
+# Update mode:
+SSH_MODE = 'SSH'
+SOURCE_MODE = 'SOURCE'
+HTTP_MODE = 'HTTP'
+# TODO: update by running http server in host
+
+DEFAULT_RTT = 0.00001
+
+SOURCE_TTL = 60
+
 
 class Host(threading.Thread):
-    def __init__(self, host_name, host_ip, server_port, user, password, interval, num_of_cpu):
+    def __init__(self, host_name, host_ip, server_port, user, password, interval, num_of_cpu, avg_pc,
+                 update_mode=SSH_MODE):
         threading.Thread.__init__(self)
         self.host_name = host_name
         self.host = host_ip
@@ -19,7 +30,7 @@ class Host(threading.Thread):
 
         self.cpu = None
         self.mem = None
-        self.num_of_proc = None
+        self.num_of_proc = 0
         self.num_of_core = num_of_cpu
 
         self.update_interval = interval
@@ -27,19 +38,27 @@ class Host(threading.Thread):
         self.user = user
         self.password = password
         self.ssh_con = None
-        self.isConnected = False
+        self.is_connected = False
         self.isRun = False
 
         self.event = threading.Event()
-        self.source_ttl = 60  # second
+        # self.source_ttl = 60  # second
 
-        self.source_list = []  # source = {'ip':,'last_connect':,'rtt':}
+        self.avg_process_time = avg_pc
+
+        assert update_mode == SSH_MODE or update_mode == SOURCE_MODE, 'Invalid update mode'
+        self.update_mode = update_mode
+
+        self.temp_comp = avg_pc
+        self.temp_comp_counter = 1
+
+        self.source_list = []  # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
 
         global logger
         logger = logging.getLogger('Host ')
         self.ssh_connect()
 
-        self.rtt = self.ping_controller()
+        # self.rtt = self.ping_controller()
 
         # if self.isConnected:
         #    self.update()
@@ -51,15 +70,15 @@ class Host(threading.Thread):
             self.ssh_con.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self.ssh_con.load_system_host_keys()
             self.ssh_con.connect(self.host, username=self.user, password=self.password, timeout=10)  # , None)
-            self.isConnected = True
+            self.is_connected = True
         except paramiko.ssh_exception.SSHException as e:
             logger.error(self.host_name + ": ssh_connect ssh Exception:", e.message)
-            self.isConnected = False
+            self.is_connected = False
         except:
             logger.error(self.host_name + ": connection fail")
 
     def close(self):
-        self.isConnected = False
+        self.is_connected = False
         self.ssh_con.close()
         logger.debug(self.host + ': closed')
 
@@ -102,16 +121,16 @@ class Host(threading.Thread):
         finally:
             return avg_rtt
 
-    def ping_source(self, dest, count=2, timeout=2, pck_size=1024):
+    def ping_source(self, source, count=2, timeout=2, pck_size=1024):
         avg_rtt = 0
 
-        if not self.isConnected:
+        if not self.is_connected:
             self.ssh_connect()
 
-        if not self.isConnected:
+        if not self.is_connected:
             return avg_rtt
         try:
-            command = "ping " + dest + " -c" + str(count) + " -s" + str(pck_size) + " -W" + str(timeout)
+            command = "ping " + source + " -c" + str(count) + " -s" + str(pck_size) + " -W" + str(timeout)
             _, stdout, stderr = self.ssh_con.exec_command(command)
             #
             # PING 131.112.21.80 (131.112.21.80) 1024(1052) bytes of data.
@@ -139,17 +158,21 @@ class Host(threading.Thread):
         finally:
             return avg_rtt
 
-    def ping_source_list(self):
-
-        # source = {'ip':,'last_connect':,'rtt':}
+    def update_rtt_source_list(self):
+        # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
         for sr in self.source_list:
-            if time.time() - sr['last_connect'] > self.source_ttl:
+            if time.time() - sr['last_connect'] > SOURCE_TTL:
                 self.source_list.remove(sr)
             else:
-                sr['rtt'] = self.ping_source(dest=sr['ip'])
+                if self.update_mode == SSH_MODE:
+                    sr['rtt'] = self.ping_source(source=sr['ip'])
+                elif self.update_mode == SOURCE_MODE:
+                    sr['rtt'] = sr['sum_rtt'] / sr['count']
+                    sr['sum_rtt'] = sr['rtt']
+                    sr['count'] = 1
 
     def get_source_rtt(self, source):
-        # source = {'ip':,'last_connect':,'rtt':}
+        # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
         new_source = True
         rtt = 0
         for sr in self.source_list:
@@ -159,17 +182,18 @@ class Host(threading.Thread):
                 sr['last_connect'] = time.time()
 
         if new_source:
-            rtt = self.ping_source(source)
-            self.source_list.append({'ip': source, 'last_connect': time.time(), 'rtt': rtt})
+            rtt = self.ping_source(source) if self.update_mode == SSH_MODE else DEFAULT_RTT
+            self.source_list.append({'ip': source, 'last_connect': time.time(), 'rtt': rtt, 'count': 1, 'sum_rtt': rtt})
+
         return rtt
 
     def vmstat(self):
         # find free mem and idle cpu
         free_mem, cpu_idle = None, None
-        if not self.isConnected:
+        if not self.is_connected:
             self.ssh_connect()
 
-        if self.isConnected:
+        if self.is_connected:
             try:
                 command = "vmstat 2 2"
                 _, stdout, stderr = self.ssh_con.exec_command(command)
@@ -200,10 +224,10 @@ class Host(threading.Thread):
     def pc_count(self):
         # ps aux | wc -l
         process_count = None
-        if not self.isConnected:
+        if not self.is_connected:
             self.ssh_connect()
 
-        if self.isConnected:
+        if self.is_connected:
             try:
                 command = "ps aux | grep " + SERVICE_NAME + " | grep " + self.user + " | wc -l"  # show num of all processes
                 # command = 'pgrep ' + SERVICE_NAME + ' | wc -l'
@@ -230,18 +254,34 @@ class Host(threading.Thread):
         logger.debug(self.host_name + ': updated')
         self.last_update = time.localtime()
 
-        if not self.isConnected:
+        if not self.is_connected:
             self.ssh_connect()
-        if self.isConnected:
+        if self.is_connected:
             self.mem, self.cpu = self.vmstat()
-            # self.rtt = self.ping_controller(count=4)
-            self.ping_source_list()
             self.num_of_proc = self.pc_count()
 
-            # print self.host, self.mem, self.cpu, self.rtt, self.num_of_proc
+        if self.update_mode == SOURCE_MODE or self.is_connected:
+            self.update_rtt_source_list()
 
-    def acceptWorklaod(self):
+        self.update_avg_process_time()
+
+        # print  '{}, num_proc = {}, comp = {}, commu = {}'.format(self.host_name, self.num_of_proc, self.avg_process_time, self.get_source_rtt('131.112.21.86'))
+
+    def accept_workload(self):
         self.num_of_proc += 1
+
+    def update_latency(self, source, commu, comp):
+        # ---Communnication-------
+        # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
+
+        for sr in self.source_list:
+            if sr['ip'] == source:
+                sr['count'] += 1
+                sr['sum_rtt'] += commu
+                break
+        # ---Computation---------
+        self.temp_comp += comp
+        self.temp_comp_counter += 1
 
     def run(self):
         self.isRun = True
@@ -254,3 +294,8 @@ class Host(threading.Thread):
     def terminate(self):
         self.isRun = False
         self.event.set()
+
+    def update_avg_process_time(self):
+        self.avg_process_time = self.temp_comp / self.temp_comp_counter
+        self.temp_comp_counter = 1
+        self.temp_comp = self.avg_process_time

@@ -64,6 +64,7 @@ def load_config(config_file):
 
 class ProcessTCPRequestHandler(SocketServer.BaseRequestHandler):
     def handle(self):
+        arrive_time = time.time()
         data = self.request.recv(buffer_size)
         pid = str(os.getpid())
         # print 'PID' + pid + ': receive message from ' + self.client_address[0]
@@ -72,8 +73,13 @@ class ProcessTCPRequestHandler(SocketServer.BaseRequestHandler):
         wid = data[0]
         puzzle = data[1]
         solved_puzzle = sudoku.solve(puzzle)
-        solved_puzzle = wid + SEPERATOR + solved_puzzle
-        self.request.sendall(solved_puzzle)
+        finish_time = time.time()
+
+        # reply_msg = [arrive_time, finish_time, work_id, solution]
+        resp = str(arrive_time) + SEPERATOR + str(finish_time) + SEPERATOR + wid + SEPERATOR + solved_puzzle
+
+        self.request.sendall(resp)
+
         global total_workload
         total_workload += 1
         logger.debug('PID' + pid + ': ' + wid + ' job is done. send the solution')
