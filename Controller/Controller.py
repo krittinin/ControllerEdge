@@ -6,7 +6,7 @@ import threading
 import time
 import yaml
 import copy
-from Host_Object import Host
+from host_thread import Host_Thread
 import os
 import sys
 import random
@@ -65,7 +65,7 @@ def check_constrain(active_host, max_latency):
     for host in active_host:
         commu, comp = host['rtt'], calculate_commp_latency(host)
         if commu == 0 or comp == 0: continue
-
+        print commu, comp
         host['total_latency'] = commu + comp
 
         # check 1: new wk not grater max.latency
@@ -163,7 +163,7 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                 active_hosts = []
                 for h in host_threads:
                     if not h.is_connected: continue
-                    hh = {'hname': h.host_name, 'ip': h.host,
+                    hh = {'hname': h.host_name, 'ip': h.host_ip,
                           'port': h.port, 'cpu': h.cpu, 'rtt': h.get_source_rtt(self.client_address[0]),
                           'avg_proc_time': h.avg_process_time, 'proc': h.num_of_proc, 'total_latency': None,
                           'max_core': h.num_of_core}
@@ -250,8 +250,9 @@ def load_hosts(host_file):
 
     for n, h_data in h_list.items():
         try:
-            h = Host(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['host-user'], h_data['host-pwd'],
-                     controller_interval, h_data['cpu-core'], h_data['avg_ps'], config['host_update'])
+            h = Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['http-port'],
+                            h_data['host-user'], h_data['host-pwd'],
+                            controller_interval, h_data['cpu-core'], h_data['avg_ps'], config['host_update'])
             h.start()  # start host threat
         except Exception as e:
             logger.error('Cannot add host: {}: {}'.format(h_data['name'], e.message))

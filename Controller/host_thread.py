@@ -1,11 +1,11 @@
 import paramiko
 import subprocess
-from sys import maxint
 import re
-from platform import system
 import time
 import logging
 import threading
+import httplib
+import yaml
 
 SERVICE_NAME = 'Sudoku_Service'
 
@@ -13,6 +13,7 @@ SERVICE_NAME = 'Sudoku_Service'
 SSH_MODE = 'SSH'
 SOURCE_MODE = 'SOURCE'
 HTTP_MODE = 'HTTP'
+
 # TODO: update by running http server in host
 
 DEFAULT_RTT = 0.00001
@@ -20,13 +21,14 @@ DEFAULT_RTT = 0.00001
 SOURCE_TTL = 60
 
 
-class Host(threading.Thread):
-    def __init__(self, host_name, host_ip, server_port, user, password, interval, num_of_cpu, avg_pc,
+class Host_Thread(threading.Thread):
+    def __init__(self, host_name, host_ip, server_port, http_port, user, password, interval, num_of_cpu, avg_pc,
                  update_mode=SSH_MODE):
         threading.Thread.__init__(self)
         self.host_name = host_name
-        self.host = host_ip
+        self.host_ip = host_ip
         self.port = server_port
+        self.http_port = http_port
 
         self.cpu = None
         self.mem = None
@@ -37,7 +39,7 @@ class Host(threading.Thread):
         self.last_update = None
         self.user = user
         self.password = password
-        self.ssh_con = None
+        self.connection = None
         self.is_connected = False
         self.isRun = False
 
@@ -46,7 +48,7 @@ class Host(threading.Thread):
 
         self.avg_process_time = avg_pc
 
-        assert update_mode == SSH_MODE or update_mode == SOURCE_MODE, 'Invalid update mode'
+        assert update_mode in {SSH_MODE, SOURCE_MODE, HTTP_MODE}, 'Invalid update mode'
         self.update_mode = update_mode
 
         self.temp_comp = avg_pc
@@ -56,31 +58,42 @@ class Host(threading.Thread):
 
         global logger
         logger = logging.getLogger('Host ')
-        self.ssh_connect()
 
-        # self.rtt = self.ping_controller()
+        if self.update_mode == HTTP_MODE:
+            self.http_connect()
+        else:
+            self.ssh_connect()
 
-        # if self.isConnected:
-        #    self.update()
+            # self.rtt = self.ping_controller()
+
+            # if self.isConnected:
+            #    self.update()
+
+    def http_connect(self):
+        try:
+            self.connection = httplib.HTTPConnection(self.host_ip, port=self.http_port)
+            self.is_connected = True
+        except httplib.HTTPException as e:
+            logger.error(self.host_name + ": http_connect Exception:", e.message)
+            self.is_connected = False
+        except:
+            logger.error(self.host_name + ": connection fail")
+            self.is_connected = False
 
     def ssh_connect(self):
         try:
             # Connect SSH
-            self.ssh_con = paramiko.SSHClient()
-            self.ssh_con.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            self.ssh_con.load_system_host_keys()
-            self.ssh_con.connect(self.host, username=self.user, password=self.password, timeout=10)  # , None)
+            self.connection = paramiko.SSHClient()
+            self.connection.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.connection.load_system_host_keys()
+            self.connection.connect(self.host_ip, username=self.user, password=self.password, timeout=10)  # , None)
             self.is_connected = True
         except paramiko.ssh_exception.SSHException as e:
             logger.error(self.host_name + ": ssh_connect ssh Exception:", e.message)
             self.is_connected = False
         except:
             logger.error(self.host_name + ": connection fail")
-
-    def close(self):
-        self.is_connected = False
-        self.ssh_con.close()
-        logger.debug(self.host + ': closed')
+            self.is_connected = False
 
     def ping_controller(self, count=3, timeout=2, pck_size=1024):
         ping_result = None
@@ -94,7 +107,7 @@ class Host(threading.Thread):
             # else:
             # for else assume linux
             ping_out = subprocess.check_output(
-                ['ping', self.host, '-c', str(count), '-s', str(pck_size), '-W', str(timeout)]).splitlines()
+                ['ping', self.host_ip, '-c', str(count), '-s', str(pck_size), '-W', str(timeout)]).splitlines()
 
             len_ping = len(ping_out)
 
@@ -111,7 +124,6 @@ class Host(threading.Thread):
                 _INDEX_AVG_RTT = 7
                 avg_rtt = float(ping_result[_INDEX_AVG_RTT])
 
-
         except subprocess.CalledProcessError as e:
             logger.error(self.host_name + ': CalledProcessError: ' + e.message)
         except ValueError:
@@ -122,6 +134,8 @@ class Host(threading.Thread):
             return avg_rtt
 
     def ping_source(self, source, count=2, timeout=2, pck_size=1024):
+        '''SSH MODE'''
+        assert self.update_mode == SSH_MODE, 'Wrong mode'
         avg_rtt = 0
 
         if not self.is_connected:
@@ -131,7 +145,7 @@ class Host(threading.Thread):
             return avg_rtt
         try:
             command = "ping " + source + " -c" + str(count) + " -s" + str(pck_size) + " -W" + str(timeout)
-            _, stdout, stderr = self.ssh_con.exec_command(command)
+            _, stdout, stderr = self.connection.exec_command(command)
             #
             # PING 131.112.21.80 (131.112.21.80) 1024(1052) bytes of data.
             # 1032 bytes from 131.112.21.80: icmp_seq=1 ttl=64 time=0.280 ms
@@ -158,7 +172,7 @@ class Host(threading.Thread):
         finally:
             return avg_rtt
 
-    def update_rtt_source_list(self):
+    def update_rtt_source_list(self, sources=None):
         # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
         for sr in self.source_list:
             if time.time() - sr['last_connect'] > SOURCE_TTL:
@@ -170,8 +184,23 @@ class Host(threading.Thread):
                     sr['rtt'] = sr['sum_rtt'] / sr['count']
                     sr['sum_rtt'] = sr['rtt']
                     sr['count'] = 1
+                elif self.update_mode == HTTP_MODE:
+                    if sources is not None:
+                        # list = [s1:{ip: , rtt: }, s2:{ip:, rtt:}, ...]
+                        for s, s_data in sources.items():
+                            if sr['ip'] == s_data['ip']:
+                                sr['rtt'] = s_data['rtt']
+                    else:
+                        logger.warning('No sources list from host')
 
     def get_source_rtt(self, source):
+        '''
+        Measure rtt from host to source
+        if source exists in maintaining list, get from the list
+        else add a new source and measure rtt newly
+        :param source: ip
+        :return: round-trip-time from host to source
+        '''
         # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
         new_source = True
         rtt = 0
@@ -188,6 +217,11 @@ class Host(threading.Thread):
         return rtt
 
     def vmstat(self):
+        '''
+        Must run in SSH MODE
+        Get free memory and idle cpu using vmstat command through ssh connection
+        '''
+        assert self.update_mode == SSH_MODE, 'Wrong mode'
         # find free mem and idle cpu
         free_mem, cpu_idle = None, None
         if not self.is_connected:
@@ -196,7 +230,7 @@ class Host(threading.Thread):
         if self.is_connected:
             try:
                 command = "vmstat 2 2"
-                _, stdout, stderr = self.ssh_con.exec_command(command)
+                _, stdout, stderr = self.connection.exec_command(command)
 
                 #
                 #       procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----
@@ -222,6 +256,11 @@ class Host(threading.Thread):
         return free_mem, cpu_idle
 
     def pc_count(self):
+        '''
+        Must run in SSH MODE'
+        cont number of process using ps and grep command through ssh connection
+        '''
+        assert self.update_mode == SSH_MODE, 'Wrong mode'
         # ps aux | wc -l
         process_count = None
         if not self.is_connected:
@@ -231,7 +270,7 @@ class Host(threading.Thread):
             try:
                 command = "ps aux | grep " + SERVICE_NAME + " | grep " + self.user + " | wc -l"  # show num of all processes
                 # command = 'pgrep ' + SERVICE_NAME + ' | wc -l'
-                _, stdout, stderr = self.ssh_con.exec_command(command)
+                _, stdout, stderr = self.connection.exec_command(command)
 
                 # 12 --> #of proc
 
@@ -250,27 +289,72 @@ class Host(threading.Thread):
 
             return process_count
 
+    def update_by_http(self):
+        '''
+        Must runin HTTP_MODE
+        Get http response then translate from yaml format to host status
+        '''
+        assert self.update_mode == HTTP_MODE, 'Wrong mode'
+        if not self.is_connected:
+            self.http_connect()
+        try:
+            if self.is_connected:
+                self.connection = httplib.HTTPConnection(self.host_ip, port=self.http_port)
+
+                self.connection.request('GET', '/')
+                resp = self.connection.getresponse()
+                # resp ==> YAML format
+                # proc: 0\n mem: 0\n cpu: 0.0\n comp: 0.0\n p-num: 0
+                # sources:\n s1:\n  ip: 127.0.0.1\n  rtt: 0\n  s-sum: 0
+                #         \n s2:\n  ip: 127.0.0.1\n  rtt: 0\n  s-sum: 0
+                assert resp.status == httplib.OK, 'Response error'
+                data = yaml.load(resp.read())
+                self.mem, self.cpu = data['mem'], data['cpu']
+                self.num_of_proc = data['proc']
+                self.update_rtt_source_list(sources=data['sources'])
+                # for s, s_data in data['sources'].items():
+                #    print s_data['ip'], s_data['rtt']
+                #    print '\n'
+
+        except yaml.YAMLError:
+            logger.error('HTTP respond not in YAML format')
+        except Exception as e:
+            logger.error('Cannot update host: ' + e.message)
+
     def update(self):
+        '''
+        update host status with controller interval
+        memory, idle cpu, number of process, rtt of each source
+        '''
         logger.debug(self.host_name + ': updated')
         self.last_update = time.localtime()
 
-        if not self.is_connected:
-            self.ssh_connect()
-        if self.is_connected:
-            self.mem, self.cpu = self.vmstat()
-            self.num_of_proc = self.pc_count()
+        if self.update_mode == SSH_MODE:
+            if not self.is_connected:
+                self.ssh_connect()
+            if self.is_connected:
+                self.mem, self.cpu = self.vmstat()
+                self.num_of_proc = self.pc_count()
+                self.update_rtt_source_list()
 
         if self.update_mode == SOURCE_MODE or self.is_connected:
             self.update_rtt_source_list()
+            # self.update_avg_process_time() #Dont update it
 
-        self.update_avg_process_time()
-
-        # print  '{}, num_proc = {}, comp = {}, commu = {}'.format(self.host_name, self.num_of_proc, self.avg_process_time, self.get_source_rtt('131.112.21.86'))
-
-    def accept_workload(self):
-        self.num_of_proc += 1
+        if self.update_mode == HTTP_MODE:
+            if not self.is_connected:
+                self.http_connect()
+            if self.is_connected:
+                self.update_by_http()
 
     def update_latency(self, source, commu, comp):
+        '''
+        Once controller receives update msg from source order this command
+        :param source: ip
+        :param commu: communication latency
+        :param comp:  computation latency
+        :return: None
+        '''
         # ---Communnication-------
         # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
 
@@ -291,11 +375,19 @@ class Host(threading.Thread):
             self.event.wait(self.update_interval)
         self.close()
 
-    def terminate(self):
-        self.isRun = False
-        self.event.set()
-
     def update_avg_process_time(self):
         self.avg_process_time = self.temp_comp / self.temp_comp_counter
         self.temp_comp_counter = 1
         self.temp_comp = self.avg_process_time
+
+    def accept_workload(self):
+        self.num_of_proc += 1
+
+    def terminate(self):
+        self.isRun = False
+        self.event.set()
+
+    def close(self):
+        self.is_connected = False
+        self.connection.close()
+        logger.debug(self.host_ip + ': closed')

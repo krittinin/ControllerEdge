@@ -41,8 +41,14 @@ FILE_EOF = 200
 UPDATE_FLAG = '1'
 ASK_FLAG = '0'
 
+# puzzle mode
+FILE_MODE = 'FILE'
+GENERATOR_MODE = 'GENERATOR'
+
 lock = threading.Condition()
 flag_condition = True
+
+is_source_update = False
 
 
 def check_exist_file(file):
@@ -134,7 +140,7 @@ def update_time_to_server(commu, comp, host_name, host_ip):
 
 
 def get_guzzle():
-    if puzzle_mode == 'file':
+    if puzzle_mode == FILE_MODE:
         l = random.randint(1, FILE_EOF)
         line = linecache.getline(puzzle_file, l).strip()
         line = line.replace(',', '\n')
@@ -143,10 +149,11 @@ def get_guzzle():
     return line
 
 
-def send_pluzzle_to_server(server_ip, server_port, puzzle):
+def send_pluzzle_to_server(server_ip, server_port, puzzle, send_time):
     status, wk_id, solved_puzzle, arrive_time, finish_time = ERR_MSG, -1, '', 0, 0
 
-    resp = send_message(server_ip, server_port, puzzle)
+    # send_msg = id, puzzle, send-time
+    resp = send_message(server_ip, server_port, puzzle + SEPERATOR + '{}'.format(send_time))
 
     if resp != ERR_MSG:
         # reply_msg = [arrive_time, finish_time, work_id, solution]
@@ -167,7 +174,7 @@ def send_pluzzle_to_server(server_ip, server_port, puzzle):
     return status, wk_id, solved_puzzle, arrive_time, finish_time
 
 
-class sourceThread(threading.Thread):
+class SourceThread(threading.Thread):
     def __init__(self, id, cip, cport, d_sip, d_sport, pzzsize, maxlatency, mmode):
         threading.Thread.__init__(self)
         self.thread_id = id
@@ -208,7 +215,8 @@ class sourceThread(threading.Thread):
         elif accept == ACPT_MSG:
             send_time = time.time()
             # solved_puzzle = send_message(server_ip, server_port, str(puzzle))
-            err, wid, solved_puzzle, arrive_time, finish_time = send_pluzzle_to_server(server_ip, server_port, puzzle)
+            err, wid, solved_puzzle, arrive_time, finish_time = send_pluzzle_to_server(server_ip, server_port, puzzle,
+                                                                                       send_time)
             receive_time = time.time()
             # solved_puzzle = solved_puzzle.split(SEPERATOR)
             total_latency = receive_time - send_time
@@ -216,12 +224,14 @@ class sourceThread(threading.Thread):
                 # total_latency = receive_time - send_time
                 compu_latency = finish_time - arrive_time
                 commu_latency = total_latency - compu_latency
-                update_time_to_server(commu_latency, compu_latency, server_name, server_ip)
-                print 'total = %5fs, commu = %5fs, compu = %5fs' % (total_latency, commu_latency, compu_latency)
+                if is_source_update:
+                    update_time_to_server(commu_latency, compu_latency, server_name, server_ip)
+                    # print 'total = %5fs, commu = %5fs, compu = %5fs' % (total_latency, commu_latency, compu_latency)
             if total_latency > self.max_latency or err == ERR_MSG:
                 is_error = True
 
-            logger.debug('Done wk_%d, %.5f seconds, %s' % (self.thread_id, total_latency, err))
+            logger.debug('Done wk_%d, %.5f seconds, %.5f+%.5f, %s' % (
+                self.thread_id, total_latency, commu_latency, compu_latency, err))
 
         global total_request, total_reject, total_error, flag_condition
         lock.acquire()
@@ -271,12 +281,15 @@ if __name__ == "__main__":
     # ---------------Finish initializing parameter-----------------
     logger.info('MAX_LEN={0[1]}, NUM_OF_WK={0[2]}, lambda={0[3]}'.format(sys.argv))
 
+    # TODO: initially connect to all hosts
+
     puzzle_size = int(config['puzzle_size'])
     mode = config['mode']
+    is_source_update = True if config['source_update'] == 'YES' else False
     puzzle_mode = config['puzzle_mode']
     puzzle_file = config['puzzle_file']
     if not check_exist_file(puzzle_file):
-        puzzle_mode = 'generator'
+        puzzle_mode = GENERATOR_MODE
         logger.warning('{} not exist, change to generator mode'.format(puzzle_file))
     else:
         # -----get file eof--------
@@ -284,9 +297,9 @@ if __name__ == "__main__":
             FILE_EOF = sum(1 for _ in f)
 
     if mode == 'test': logger.warning('Test mode')
-    if puzzle_mode == 'generator': logger.warning('Use puzzle generator, may delay the program')
+    if puzzle_mode == GENERATOR_MODE: logger.warning('Use puzzle generator, may delay the program')
 
-    is_test_mode = (mode == TEST_MODE)
+    # is_test_mode = (mode == TEST_MODE)
 
     server_ip = config['default_server_ip']
     server_port = config['default_server_port']
@@ -295,7 +308,7 @@ if __name__ == "__main__":
 
     try:
         for i in range(num_of_workloads):
-            client = sourceThread(i, controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
+            client = SourceThread(i, controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
                                   mode)
             client.daemon = True
             client.start()
