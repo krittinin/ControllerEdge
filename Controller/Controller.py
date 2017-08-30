@@ -6,7 +6,7 @@ import threading
 import time
 import yaml
 import copy
-from host_thread import Host_Thread
+import host_thread as host_th
 import os
 import sys
 import random
@@ -64,8 +64,9 @@ def check_constrain(active_host, max_latency):
     # get total_latncy for each host
     for host in active_host:
         commu, comp = host['rtt'], calculate_commp_latency(host)
+        print host['hname'], commu, comp
         if commu == 0 or comp == 0: continue
-        print commu, comp
+        print host['hname'], commu, comp
         host['total_latency'] = commu + comp
 
         # check 1: new wk not grater max.latency
@@ -250,9 +251,11 @@ def load_hosts(host_file):
 
     for n, h_data in h_list.items():
         try:
-            h = Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['http-port'],
-                            h_data['host-user'], h_data['host-pwd'],
-                            controller_interval, h_data['cpu-core'], h_data['avg_ps'], config['host_update'])
+            h = host_th.Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['http-port'],
+                                    h_data['host-user'], h_data['host-pwd'],
+                                    controller_interval, h_data['cpu-core'], h_data['avg-ps'], config['host_update'])
+            if h.update_mode == host_th.SSH_UDP_MODE:
+                h.set_udp_pinger(h_data['udp-client-path'], h_data['udp-client-port'])
             h.start()  # start host threat
         except Exception as e:
             logger.error('Cannot add host: {}: {}'.format(h_data['name'], e.message))

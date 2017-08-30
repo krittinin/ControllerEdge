@@ -19,7 +19,7 @@ total_reject = 0
 total_error = 0
 buffer_size = 1024
 socket_timeout = 15
-max_thread_list = 100
+# max_thread_list = 100
 
 streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
 logging.basicConfig(level=logging.DEBUG,
@@ -304,7 +304,7 @@ if __name__ == "__main__":
     server_ip = config['default_server_ip']
     server_port = config['default_server_port']
 
-    threads = collections.deque(maxlen=max_thread_list)
+    threads = collections.deque(maxlen=(num_of_workloads / 2))
 
     try:
         for i in range(num_of_workloads):
@@ -316,8 +316,8 @@ if __name__ == "__main__":
             next_workload = random.expovariate(wk_rate)  # as poisson process
             logger.debug("Next wk_%d: %.5f seconds" % ((i + 1), next_workload))
 
-            if len(threads) >= max_thread_list:
-                logger.warning('Threads reach the max size.')
+            # if len(threads) >= max_thread_list:
+            #    logger.warning('Threads reach the max size.')
             time.sleep(next_workload)
 
     except KeyboardInterrupt, SystemExit:
