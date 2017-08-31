@@ -25,7 +25,7 @@ UDP_PINGER = 'UDPPingerClient.py'
 
 
 class Host_Thread(threading.Thread):
-    def __init__(self, host_name, host_ip, server_port, http_port, user, password, interval, num_of_cpu, avg_pc,
+    def __init__(self, host_name, host_ip, server_port, http_port, user, interval, num_of_cpu, avg_pc,
                  update_mode=SSH_MODE, udp_pinger_path=None, udp_pinger_port=None):
         threading.Thread.__init__(self)
         self.host_name = host_name
@@ -41,7 +41,6 @@ class Host_Thread(threading.Thread):
         self.update_interval = interval
         self.last_update = None
         self.user = user
-        self.password = password
         self.connection = None
         self.is_connected = False
         self.isRun = False
@@ -113,7 +112,7 @@ class Host_Thread(threading.Thread):
             self.connection = paramiko.SSHClient()
             self.connection.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             self.connection.load_system_host_keys()
-            self.connection.connect(self.host_ip, username=self.user, password=self.password, timeout=10)  # , None)
+            self.connection.connect(self.host_ip, username=self.user, timeout=10)  # , None)
             self.is_connected = True
         except paramiko.ssh_exception.SSHException as e:
             logger.error("{}: ssh_connect ssh Exception:{}".format(self.host_name, e.message))

@@ -4,7 +4,6 @@ host1:
   sever-port: 51871
   http-port: 8081
   host-user: host
-  host-pwd: 123qweasd
   cpu-core: 4
   avg-ps: 0.0363655421336 #12x12
   udp-client-path: /home/host/sudoku
@@ -16,7 +15,6 @@ host1:
 #  sever-port: 51871
 #  http-port: 8081
 #  host-user: host
-#  host-pwd: 123qweasd
 #  cpu-core: 1
 #  avg-ps: 0.0225951300837 #12x12
 #  udp-client-path:
@@ -28,7 +26,6 @@ host1:
 #  sever-port: 51871
 #  http-port: 8081
 #  host-user: openmano
-#  host-pwd: 123qweasd
 #  cpu-core: 2
 #  avg-ps: 0.0298268128959
 #  udp-client-path:

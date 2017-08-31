@@ -160,7 +160,7 @@ def send_pluzzle_to_server(server_ip, server_port, puzzle, send_time):
         resp = resp.split(SEPERATOR)
         if len(resp) == 4:
             try:
-                status = 'OK'
+                status = 'Done'
                 arrive_time = float(resp[0])
                 finish_time = float(resp[1])
                 wk_id = int(resp[2])
@@ -220,17 +220,19 @@ class SourceThread(threading.Thread):
             receive_time = time.time()
             # solved_puzzle = solved_puzzle.split(SEPERATOR)
             total_latency = receive_time - send_time
+            compu_latency = finish_time - arrive_time
+            commu_latency = total_latency - compu_latency
             if err != ERR_MSG:
                 # total_latency = receive_time - send_time
-                compu_latency = finish_time - arrive_time
-                commu_latency = total_latency - compu_latency
+                # compu_latency = finish_time - arrive_time
+                # commu_latency = total_latency - compu_latency
                 if is_source_update:
                     update_time_to_server(commu_latency, compu_latency, server_name, server_ip)
                     # print 'total = %5fs, commu = %5fs, compu = %5fs' % (total_latency, commu_latency, compu_latency)
             if total_latency > self.max_latency or err == ERR_MSG:
                 is_error = True
 
-            logger.debug('Done wk_%d, %.5f seconds, %.5f+%.5f, %s' % (
+            logger.debug('Receive wk_%d, %.5f seconds, %.5f+%.5f, %s' % (
                 self.thread_id, total_latency, commu_latency, compu_latency, err))
 
         global total_request, total_reject, total_error, flag_condition

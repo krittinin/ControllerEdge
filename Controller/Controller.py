@@ -252,8 +252,8 @@ def load_hosts(host_file):
     for n, h_data in h_list.items():
         try:
             h = host_th.Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['http-port'],
-                                    h_data['host-user'], h_data['host-pwd'],
-                                    controller_interval, h_data['cpu-core'], h_data['avg-ps'], config['host_update'])
+                                    h_data['host-user'], controller_interval, h_data['cpu-core'], h_data['avg-ps'],
+                                    config['host_update'])
             if h.update_mode == host_th.SSH_UDP_MODE:
                 h.set_udp_pinger(h_data['udp-client-path'], h_data['udp-client-port'])
             h.start()  # start host threat
