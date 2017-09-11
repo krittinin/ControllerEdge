@@ -1,32 +1,21 @@
 host1:
   name: host1
   host-ip: 131.112.21.11
+  ssh-port: 22
   sever-port: 51871
-  http-port: 8081
   host-user: host
   cpu-core: 4
-  avg-ps: 0.0363655421336 #12x12
-  udp-client-path: /home/host/sudoku
+  avg-ps: 0.0363655421336  #12x12
+  udp-client-path: /home/host/server
   udp-client-port: 51149
 
 #host2:
 #  name: host2
-#  host-ip: 131.112.21.11
+#  host-ip: oldtanega.iic.hokudai.ac.jp
+#  ssh-port: 54322
 #  sever-port: 51871
-#  http-port: 8081
-#  host-user: host
-#  cpu-core: 1
-#  avg-ps: 0.0225951300837 #12x12
-#  udp-client-path:
-#  udp-client-port: 51149
-
-#host3:
-#  name: host3
-#  host-ip: 131.112.21.40
-#  sever-port: 51871
-#  http-port: 8081
-#  host-user: openmano
-#  cpu-core: 2
-#  avg-ps: 0.0298268128959
-#  udp-client-path:
+#  host-user: pao
+#  cpu-core: 4
+#  avg-ps: 0.0217159660958
+#  udp-client-path: /home/pao/face_rec
 #  udp-client-port: 51149

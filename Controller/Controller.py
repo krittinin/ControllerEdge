@@ -5,7 +5,6 @@ import logging
 import threading
 import time
 import yaml
-import copy
 import host_thread as host_th
 import os
 import sys
@@ -28,11 +27,10 @@ ERR_MSG = 'Error'
 ACPT_MSG = 'Accept'
 REJ_MSG = 'Reject'
 
-# CTRL_MSG flag
-UPDATE_FLAG = '1'
-ASK_FLAG = '0'
-
 SEPERATOR = ','
+
+SEED = 8713
+random.seed(SEED)
 
 RANDOM_POLICY = 0
 LOW_LATENCY_POLICY = 1
@@ -40,6 +38,8 @@ LOW_LATENCY_POLICY = 1
 buffer_size = 1024
 controller_interval = 20  # second
 policy = RANDOM_POLICY
+
+CLT_INT_FLAG = 'CLT_INI_SETUP'
 
 
 def calculate_commp_latency(host):
@@ -50,25 +50,22 @@ def calculate_commp_latency(host):
     # num_core = max. single threads server can run simultaneously
     # proc = number of current process
     # num_core > proc ==> server provides full efficiency to wk.
-
     cpu = host['max_core'] / float((host['proc'])) if host['max_core'] <= host['proc'] else 1
     comp = comp / cpu
     # print host['hname'], cpu, comp
     return comp
 
 
-def check_constrain(active_host, max_latency):
+def check_constrain(work_id, active_host, max_latency):
     # assume permissive syst.
 
     candidate_hosts = []
     # get total_latncy for each host
     for host in active_host:
         commu, comp = host['rtt'], calculate_commp_latency(host)
-        print host['hname'], commu, comp
+        logger.debug('wid_%d, candidate %s: %.6f + %.6f' % (work_id, host['hname'], commu, comp))
         if commu == 0 or comp == 0: continue
-        print host['hname'], commu, comp
         host['total_latency'] = commu + comp
-
         # check 1: new wk not grater max.latency
         if 0 < host['total_latency'] <= max_latency:
             candidate_hosts.append(host)
@@ -78,10 +75,10 @@ def check_constrain(active_host, max_latency):
     return candidate_hosts
 
 
-def select_host(policy, active_hosts, max_latency):
+def select_host(work_id, policy, active_hosts, max_latency):
     is_accepted, host = False, None
 
-    candidate_hosts = check_constrain(active_hosts, max_latency)
+    candidate_hosts = check_constrain(work_id, active_hosts, max_latency)
 
     if policy == RANDOM_POLICY:
         is_accepted, host = select_random(candidate_hosts)
@@ -93,6 +90,8 @@ def select_host(policy, active_hosts, max_latency):
             if h.host_name == host['hname']:
                 # print h.num_of_proc
                 h.accept_workload()
+                # logger.debug('wid_{}, select {}: {} {}'.format(work_id, host['hname'], host['rtt'],
+                #                                               host['total_latency'] - host['rtt']))
                 # print h.host_name, h.num_of_proc
                 break
 
@@ -136,30 +135,31 @@ def update_latency_host(source, host_name, host_ip, commu, comp):
 class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
     def handle(self):
         try:
-            global total_request, total_reject
-
             data = self.request.recv(buffer_size)
 
-            # data = ASK_FLAG, id,max_latency,size-of_puzzle
-            # data = UPDATE_FLAG, host_name, host_ip, commu, comp
+            if str(data).startswith(CLT_INT_FLAG):
+                # resp = [policy, interval]
+                response = SEPERATOR.join(('RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY',
+                                           str(controller_interval)))
+                self.request.sendall(response)
+            else:
 
-            data = str(data).strip()
-            data = data.split(SEPERATOR)
-            logger.debug('recv() {} from {}'.format(data, self.client_address[0]))
+                global total_request, total_reject
 
-            if data[0] == UPDATE_FLAG:
-                assert len(data) == 5, 'Data not fit in format'
-                d3, d4 = float(data[3]), float(data[4])
-                update_latency_host(self.client_address[0], data[1], data[2], d3, d4)
-            elif data[0] == ASK_FLAG:
+                # data = id,max_latency,size-of_puzzle
+
+                data = str(data).strip()
+                data = data.split(SEPERATOR)
+                logger.debug('recv() {} from {}'.format(data, self.client_address[0]))
+
                 total_request += 1
-                assert len(data) == 4, 'Data not fit in format'
+                assert len(data) == 3, 'Data not fit in format'
 
                 if not controller_is_ready:
                     raise Exception('Controller is not ready')
 
-                work_id = int(data[1])
-                max_latency = float(data[2])
+                work_id = int(data[0])
+                max_latency = float(data[1])
 
                 active_hosts = []
                 for h in host_threads:
@@ -170,19 +170,22 @@ class ControllerThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
                           'max_core': h.num_of_core}
                     active_hosts.append(hh)
 
-                is_accepted, selected_host = select_host(policy, active_hosts, max_latency)
-                response = REJ_MSG + SEPERATOR + str(
-                    work_id) + SEPERATOR + "No_host" + SEPERATOR + "None" + SEPERATOR + "0"
+                is_accepted, selected_host = select_host(work_id, policy, active_hosts, max_latency)
+                response = SEPERATOR.join((REJ_MSG, str(work_id), "No_host", "None", "0", "0", "0"))
                 if is_accepted:
-                    response = ACPT_MSG + SEPERATOR + str(work_id) + SEPERATOR + selected_host['hname'] + SEPERATOR + \
-                               selected_host['ip'] + SEPERATOR + str(selected_host['port'])
-                logger.debug(response)
+                    response = SEPERATOR.join((ACPT_MSG, str(work_id), selected_host['hname'], selected_host['ip'],
+                                               str(selected_host['port']), str(selected_host['rtt']),
+                                               str(selected_host['total_latency'] - selected_host['rtt'])))
+                    logger.debug(response)
                 self.request.sendall(response)
 
                 if not is_accepted: total_reject += 1
 
         except ValueError:
             logger.error('Request error: cannot convert data ')
+        except AssertionError as e:
+            logger.error('Request error: ' + e.message)
+            total_reject += 1
         except Exception as e:
             logger.error('Request error: ' + e.message)
             total_reject += 1
@@ -251,11 +254,11 @@ def load_hosts(host_file):
 
     for n, h_data in h_list.items():
         try:
-            h = host_th.Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['http-port'],
-                                    h_data['host-user'], controller_interval, h_data['cpu-core'], h_data['avg-ps'],
-                                    config['host_update'])
+            h = host_th.Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['host-user'],
+                                    controller_interval, h_data['cpu-core'], h_data['avg-ps'], config['host_update'])
             if h.update_mode == host_th.SSH_UDP_MODE:
                 h.set_udp_pinger(h_data['udp-client-path'], h_data['udp-client-port'])
+            if h_data['ssh-port'] is not None: h.ssh_port = h_data['ssh-port']
             h.start()  # start host threat
         except Exception as e:
             logger.error('Cannot add host: {}: {}'.format(h_data['name'], e.message))
@@ -264,22 +267,6 @@ def load_hosts(host_file):
 
     return (len(hosts) > 0), hosts
 
-
-'''
-def update_host():
-    hlist = []
-    for h in host_threads:
-        # h.update()
-        if not h.is_connected: continue
-        hh = {'name': h.name, 'ip': h.host, 'port': h.port, 'cpu': h.cpu, 'rtt': h.rtt, 'proc': h.num_of_proc,
-              'process_time': h.avg_process_time}
-        hlist.append(hh)
-    return hlist
-'''
-
-# TODO: send API to openvim to look up host
-
-# TODO: list and find IP of VM in host
 
 if __name__ == "__main__":
 
@@ -350,14 +337,6 @@ if __name__ == "__main__":
     server_thread.daemon = True
     server_thread.start()
     logger.debug('Server loop running in thread{}'.format(server_thread.name))
-    '''
-    temp_host_list = update_host()
-    lock_host_list.acquire()
-    try:
-        active_host_list = copy.copy(temp_host_list)
-    finally:
-        lock_host_list.release()
-    '''
     controller_is_ready = True
     logger.info('Controller is ready')
     sys.stdout.flush()
@@ -378,6 +357,11 @@ if __name__ == "__main__":
     logger.debug('Shut down a server')
     server.shutdown()
     server.server_close()
-    print "total reject=", total_reject, ", total=", total_request
+    result_text = "Policy={}, interval={}, total={}, reject={}".format(
+        'RANDOM' if policy == RANDOM_POLICY else 'LOW.LATENCY' if policy == LOW_LATENCY_POLICY else 'ELSE',
+        controller_interval, total_request,
+        total_reject)
+    print result_text
+    logger.info(result_text)
     logger.info('Exit')
     exit()

@@ -1,0 +1,2249 @@
+Index: Serever/host_httpserver.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Serever/host_httpserver.py	(revision )
++++ Serever/host_httpserver.py	(revision )
+@@ -0,0 +1,115 @@
++import threading
++from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
++import subprocess as sub
++import os
++import logging
++import yaml
++import time
++
++streamformat = "%(asctime)s %(name)s %(levelname)s: %(message)s"
++logging.basicConfig(level=logging.DEBUG,
++                    format=streamformat, filename='./log/server_' + time.strftime("%m%d-%H%M") + '.log',
++                    filemode='w')
++global logger
++logger = logging.getLogger('HTTP_SERVER')
++
++RECORD_LATENCY_FILE = 'record.txt'
++
++DEFAULT_USER = 'host'
++SERVICE_NAME = 'Sudoku_Service'
++
++
++def ps_aux_grep(user, service):
++    # pc = None
++    p1 = sub.Popen(['ps', 'aux'], stdout=sub.PIPE)
++    p2 = sub.Popen(['grep', user], stdin=p1.stdout, stdout=sub.PIPE)
++    p3 = sub.Popen(['grep', service], stdin=p2.stdout, stdout=sub.PIPE)
++    p4 = sub.Popen(['wc', '-l'], stdin=p3.stdout, stdout=sub.PIPE, stderr=sub.PIPE)
++
++    p1.stdout.close()
++    p2.stdout.close()
++    p3.stdout.close()
++
++    out, err = p4.communicate()
++    pc = out
++
++    return pc
++
++
++def vmstat():
++    p1 = sub.Popen(['vmstat'], stdout=sub.PIPE, stderr=sub.PIPE)
++    out, err = p1.communicate()
++
++    out = out.splitlines()
++    out = out[len(out) - 1]
++    out = out.split()
++
++    mem, cpu = '', ''
++    if len(out) >= 14:
++        mem = out[3]
++        cpu = out[14]
++
++    return mem, cpu
++
++
++def read_record_file(file):
++    # comm, comp = 0.0, 0.0
++    record_data = 'comp: 0.0\np-num: 0\nsources:'
++    try:
++        assert os.path.isfile(file), '{} not exist'.format(file)
++        with open(file, 'r') as f:
++            record_data = f.read()
++            # data = yaml.load(dataF)
++            # data  = {comp: 0.0, p-num: 0, sources: {s1:{ip: '120', comm: 0.0, s_num: 0}, s2: {} } }
++            # comm, comp = data['comm'], data['comp']
++    except IOError as e:
++        logger.error(e.message)
++    except yaml.YAMLError:
++        logger.error('{} not in YAML format'.format(file))
++    return record_data
++
++
++# Create custom HTTPRequestHandler class
++class HostHTTPRequestHandler(BaseHTTPRequestHandler):
++    # handle GET command
++    def do_GET(self):
++        # rootdir = '/home/pao/PycharmProjects/HTTPSERVER/'  # file location
++        try:
++            # send code 200 response
++            self.send_response(200)
++            # send header first
++            self.send_header('Content-type', 'text/html')
++            self.end_headers()
++            message = ps_aux_grep(DEFAULT_USER, SERVICE_NAME)
++            mem, cpu = vmstat()
++            recd = read_record_file(RECORD_LATENCY_FILE)
++            # send file content to client
++            self.wfile.write('proc: {}\nmem: {}\ncpu: {}\n{}'.format(message, mem, cpu, recd))
++            # f.close()
++            return
++
++        except IOError:
++            self.send_error(404, 'file not found')
++            logger.error('file not found')
++        except:
++            logger.error('http error: cannot send the update')
++
++
++class HostHTTPThread(threading.Thread):
++    def __init__(self, host_user, server_ip, server_port, service_name):
++        threading.Thread.__init__(self)
++        # self.user = host_user
++        self.address = (server_ip, server_port)
++        self.httpd = HTTPServer(self.address, HostHTTPRequestHandler)
++
++        global DEFAULT_USER, SERVICE_NAME
++        DEFAULT_USER = host_user
++        SERVICE_NAME = service_name
++
++    def run(self):
++        logger.info('HTTP server is running...')
++        self.httpd.serve_forever()
++
++    def close(self):
++        self.httpd.server_close()
++        logger.info('HTTP server is closed.')
+Index: .idea/dictionaries/pao.xml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- .idea/dictionaries/pao.xml	(revision )
++++ .idea/dictionaries/pao.xml	(revision )
+@@ -0,0 +1,7 @@
++<component name="ProjectDictionaryState">
++  <dictionary name="pao">
++    <words>
++      <w>defualt</w>
++    </words>
++  </dictionary>
++</component>
+\ No newline at end of file
+Index: Serever/Sudoku_Service.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Serever/Sudoku_Service.py	(date 1503642236000)
++++ Serever/Sudoku_Service.py	(revision )
+@@ -6,6 +6,7 @@
+ import os
+ import time
+ import sys
++from host_httpserver import HostHTTPThread
+ 
+ buffer_size = 1024
+ 
+@@ -23,6 +24,10 @@
+                     format=streamformat, filename='./log/server_' + time.strftime("%m%d-%H%M") + '.log',
+                     filemode='w')
+ 
++RECORD_LATENCY_FILE = 'record.txt'
++SERVICE_NAME = 'Sudoku_Service'
++http_flag = False
++
+ 
+ def read_file(input_file):
+     read_data = None
+@@ -62,27 +67,82 @@
+     return True, config
+ 
+ 
++def record_file_format(comp, p_num):
++    return 'comp: {}\np-num: {}\nsources:\n'.format(comp, p_num)
++
++
++def record_file_source_format(s, ip, rtt, s_num):
++    return ' {}:\n  ip: {}\n  rtt: {}\n  s-num: {}\n'.format(s, ip, rtt, s_num)
++
++
++def record_workload_in_file(source, comm, comp, file_name):
++    with open(file_name, 'r') as f:
++        read_data = f.read()
++
++    new_source = source not in read_data
++
++    data = yaml.load(read_data)
++
++    # data  = {comp: 0.0, p-num: 0, sources: {s1:{ip: '120', rtt: 0.0, s-num: 0}, s2: {} } }
++    p_num = data['p-num'] + 1
++    avg_comp = (data['comp'] * data['p-num'] + comp) / p_num
++    w = record_file_format(avg_comp, p_num)
++    if new_source:
++        if data['sources'] is not None:
++            for s, s_data in data['sources'].items():
++                w += record_file_source_format(s, s_data['ip'], s_data['rtt'], s_data['s-num'])
++        w += record_file_source_format('s{}'.format(
++            len(data['sources']) if data['sources'] is not None else 0), source, comm, 1)
++    else:
++        for s, s_data in data['sources'].items():
++            if s_data['ip'] == source:
++                s_num = s_data['s-num']
++                avg_comm = (s_data['rtt'] * s_num + comm) / (s_num + 1)
++                s_num += 1
++                w += record_file_source_format(s, s_data['ip'], avg_comm, s_num)
++            else:
++                w += record_file_source_format(s, s_data['ip'], s_data['rtt'], s_data['s-num'])
++
++    with open(file_name, 'w') as f:
++        f.write(w)
++
++
+ class ProcessTCPRequestHandler(SocketServer.BaseRequestHandler):
+     def handle(self):
+         arrive_time = time.time()
+         data = self.request.recv(buffer_size)
+         pid = str(os.getpid())
+         # print 'PID' + pid + ': receive message from ' + self.client_address[0]
+-        logger.debug('PID' + pid + ': receive message from ' + self.client_address[0])
+-        data = str(data).split(SEPERATOR)
+-        wid = data[0]
+-        puzzle = data[1]
+-        solved_puzzle = sudoku.solve(puzzle)
+-        finish_time = time.time()
++        source = self.client_address[0]
++        logger.debug('PID' + pid + ': receive message from ' + source)
++
++        # msg = wid, puzzle, send-time
++        try:
++            data = str(data).split(SEPERATOR)
++            assert len(data) == 3, 'Receive err message'
++            wid = data[0]
++            puzzle = data[1]
++            send_time = float(data[2])
++            solved_puzzle = sudoku.solve(puzzle)
++            finish_time = time.time()
+ 
+-        # reply_msg = [arrive_time, finish_time, work_id, solution]
+-        resp = str(arrive_time) + SEPERATOR + str(finish_time) + SEPERATOR + wid + SEPERATOR + solved_puzzle
++            # reply_msg = [arrive_time, finish_time, work_id, solution]
++            resp = str(arrive_time) + SEPERATOR + str(finish_time) + SEPERATOR + wid + SEPERATOR + solved_puzzle
+ 
+-        self.request.sendall(resp)
++            self.request.sendall(resp)
++            logger.debug('PID{}: {} job is done. send the solution'.format(pid, wid))
+ 
+-        global total_workload
+-        total_workload += 1
+-        logger.debug('PID' + pid + ': ' + wid + ' job is done. send the solution')
++            # global total_workload
++            # total_workload += 1
++            if http_flag:
++                record_workload_in_file(source, arrive_time - send_time, finish_time - arrive_time, RECORD_LATENCY_FILE)
++
++        except yaml.YAMLError:
++            logger.error('PID{} cannot update {}'.format(pid, RECORD_LATENCY_FILE))
++        except IOError:
++            logger.error('{} not found'.format(RECORD_LATENCY_FILE))
++        except Exception as e:
++            logger.error('PID{}: {}'.format(pid, e.message))
+ 
+ 
+ class ProcessTCPServer(SocketServer.ForkingMixIn, SocketServer.TCPServer):
+@@ -109,8 +169,23 @@
+ 
+     logger.addHandler(console)
+ 
++    user = config['user']
+     server_ip = config['server_ip']
+     server_port = config['server_port']
++    http_port = config['http_port']
++
++    # read parameter
++    assert len(sys.argv) <= 2, 'Please insert [-http] if you want to run http server'
++    http_flag = False
++    http_thread = None
++    if len(sys.argv) > 1 and sys.argv[1] == '-http':
++        # Start HTTP server
++        http_flag = True
++        with open(RECORD_LATENCY_FILE, 'w') as f:
++            f.write(record_file_format(0.0, 0))
++        http_thread = HostHTTPThread(user, server_ip, http_port, SERVICE_NAME)
++        http_thread.daemon = True
++        http_thread.start()
+ 
+     logger.info('Start service..')
+ 
+@@ -134,6 +209,7 @@
+     logger.debug('Server is shutting down')
+     server.shutdown()
+     server.server_close()
++    if http_flag: http_thread.close()
+     print 'Total workloads =', total_workload
+     logger.info('Exit server')
+     exit()
+Index: Controller/log/controller_0810-1701.log
+===================================================================
+--- Controller/log/controller_0810-1701.log	(date 1503642236000)
++++ Controller/log/controller_0810-1701.log	(date 1503642236000)
+@@ -1,65 +0,0 @@
+-2017-08-10 17:01:45,835 Controller INFO: load configuration...
+-2017-08-10 17:01:45,836 Controller INFO: Connecting host(s)...
+-2017-08-10 17:01:45,843 paramiko.transport DEBUG: starting thread (client mode): 0x95d2fe10L
+-2017-08-10 17:01:45,843 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 17:01:45,852 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 17:01:45,852 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 17:01:45,853 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 17:01:45,853 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 17:01:45,853 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 17:01:45,853 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 17:01:45,853 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 17:01:45,911 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 17:01:45,912 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 17:01:45,944 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 17:01:45,945 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 17:01:45,951 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:01:45,963 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 17:01:45,977 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:01:46,020 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 17:01:48,048 Host  DEBUG: host2: updated
+-2017-08-10 17:01:48,050 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 17:01:48,055 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 17:01:48,055 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 17:01:48,055 paramiko.transport DEBUG: starting thread (client mode): 0x95cce7d0L
+-2017-08-10 17:01:48,056 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 17:01:48,056 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 17:01:48,056 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 17:01:48,061 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 17:01:48,061 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 17:01:48,062 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 17:01:48,062 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 17:01:48,062 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 17:01:48,062 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 17:01:48,128 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 17:01:48,129 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 17:01:48,157 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 17:01:48,158 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 17:01:48,166 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:01:48,177 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 17:01:48,190 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:01:48,201 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 17:01:48,309 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 17:01:48,309 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 17:01:50,062 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 17:01:50,063 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 17:01:50,063 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 17:01:50,063 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 17:01:50,063 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 17:01:50,103 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 17:01:50,113 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 17:01:50,113 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 17:01:50,211 Host  DEBUG: host1: updated
+-2017-08-10 17:01:50,211 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 17:01:50,212 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 17:01:50,212 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 17:01:50,213 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 17:01:51,212 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 17:01:52,217 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 17:01:52,218 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 17:01:52,218 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 17:01:52,254 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 17:01:52,255 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 17:01:52,283 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 17:01:52,311 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 17:01:52,312 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+Index: Client/Source.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Client/Source.py	(date 1503642236000)
++++ Client/Source.py	(revision )
+@@ -41,9 +41,15 @@
+ UPDATE_FLAG = '1'
+ ASK_FLAG = '0'
+ 
++# puzzle mode
++FILE_MODE = 'FILE'
++GENERATOR_MODE = 'GENERATOR'
++
+ lock = threading.Condition()
+ flag_condition = True
+ 
++is_source_update = False
++
+ 
+ def check_exist_file(file):
+     if not os.path.isfile(file):
+@@ -134,7 +140,7 @@
+ 
+ 
+ def get_guzzle():
+-    if puzzle_mode == 'file':
++    if puzzle_mode == FILE_MODE:
+         l = random.randint(1, FILE_EOF)
+         line = linecache.getline(puzzle_file, l).strip()
+         line = line.replace(',', '\n')
+@@ -143,10 +149,11 @@
+     return line
+ 
+ 
+-def send_pluzzle_to_server(server_ip, server_port, puzzle):
++def send_pluzzle_to_server(server_ip, server_port, puzzle, send_time):
+     status, wk_id, solved_puzzle, arrive_time, finish_time = ERR_MSG, -1, '', 0, 0
+ 
+-    resp = send_message(server_ip, server_port, puzzle)
++    # send_msg = id, puzzle, send-time
++    resp = send_message(server_ip, server_port, puzzle + SEPERATOR + '{}'.format(send_time))
+ 
+     if resp != ERR_MSG:
+         # reply_msg = [arrive_time, finish_time, work_id, solution]
+@@ -167,7 +174,7 @@
+     return status, wk_id, solved_puzzle, arrive_time, finish_time
+ 
+ 
+-class sourceThread(threading.Thread):
++class SourceThread(threading.Thread):
+     def __init__(self, id, cip, cport, d_sip, d_sport, pzzsize, maxlatency, mmode):
+         threading.Thread.__init__(self)
+         self.thread_id = id
+@@ -208,7 +215,8 @@
+         elif accept == ACPT_MSG:
+             send_time = time.time()
+             # solved_puzzle = send_message(server_ip, server_port, str(puzzle))
+-            err, wid, solved_puzzle, arrive_time, finish_time = send_pluzzle_to_server(server_ip, server_port, puzzle)
++            err, wid, solved_puzzle, arrive_time, finish_time = send_pluzzle_to_server(server_ip, server_port, puzzle,
++                                                                                       send_time)
+             receive_time = time.time()
+             # solved_puzzle = solved_puzzle.split(SEPERATOR)
+             total_latency = receive_time - send_time
+@@ -216,12 +224,14 @@
+                 # total_latency = receive_time - send_time
+                 compu_latency = finish_time - arrive_time
+                 commu_latency = total_latency - compu_latency
+-                update_time_to_server(commu_latency, compu_latency, server_name, server_ip)
+-                print 'total = %5fs, commu = %5fs, compu = %5fs' % (total_latency, commu_latency, compu_latency)
++                if is_source_update:
++                    update_time_to_server(commu_latency, compu_latency, server_name, server_ip)
++                    # print 'total = %5fs, commu = %5fs, compu = %5fs' % (total_latency, commu_latency, compu_latency)
+             if total_latency > self.max_latency or err == ERR_MSG:
+                 is_error = True
+ 
+-            logger.debug('Done wk_%d, %.5f seconds, %s' % (self.thread_id, total_latency, err))
++            logger.debug('Done wk_%d, %.5f seconds, %.5f+%.5f, %s' % (
++                self.thread_id, total_latency, commu_latency, compu_latency, err))
+ 
+         global total_request, total_reject, total_error, flag_condition
+         lock.acquire()
+@@ -271,12 +281,15 @@
+     # ---------------Finish initializing parameter-----------------
+     logger.info('MAX_LEN={0[1]}, NUM_OF_WK={0[2]}, lambda={0[3]}'.format(sys.argv))
+ 
++    # TODO: initially connect to all hosts
++
+     puzzle_size = int(config['puzzle_size'])
+     mode = config['mode']
++    is_source_update = True if config['source_update'] == 'YES' else False
+     puzzle_mode = config['puzzle_mode']
+     puzzle_file = config['puzzle_file']
+     if not check_exist_file(puzzle_file):
+-        puzzle_mode = 'generator'
++        puzzle_mode = GENERATOR_MODE
+         logger.warning('{} not exist, change to generator mode'.format(puzzle_file))
+     else:
+         # -----get file eof--------
+@@ -284,9 +297,9 @@
+             FILE_EOF = sum(1 for _ in f)
+ 
+     if mode == 'test': logger.warning('Test mode')
+-    if puzzle_mode == 'generator': logger.warning('Use puzzle generator, may delay the program')
++    if puzzle_mode == GENERATOR_MODE: logger.warning('Use puzzle generator, may delay the program')
+ 
+-    is_test_mode = (mode == TEST_MODE)
++    # is_test_mode = (mode == TEST_MODE)
+ 
+     server_ip = config['default_server_ip']
+     server_port = config['default_server_port']
+@@ -295,7 +308,7 @@
+ 
+     try:
+         for i in range(num_of_workloads):
+-            client = sourceThread(i, controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
++            client = SourceThread(i, controller_ip, controller_port, server_ip, server_port, puzzle_size, max_latency,
+                                   mode)
+             client.daemon = True
+             client.start()
+Index: Controller/host_file.yaml
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Controller/host_file.yaml	(date 1503642236000)
++++ Controller/host_file.yaml	(revision )
+@@ -1,16 +1,18 @@
+-host1:
+-  name: host1
+-  host-ip: 131.112.21.86
+-  sever-port: 51871
+-  host-user: host
+-  host-pwd: 123qweasd
+-  cpu-core: 4
+-  avg_ps: 0.0363655421336 #12x12
++#host1:
++#  name: host1
++#  host-ip: 131.112.21.86
++#  sever-port: 51871
++#  http-port: 8081
++#  host-user: host
++#  host-pwd: 123qweasd
++#  cpu-core: 4
++#  avg_ps: 0.0363655421336 #12x12
+ host2:
+   name: host2
+-  host-ip: 131.112.21.83
++  host-ip: 131.112.21.33
+   sever-port: 51871
++  http-port: 8081
+   host-user: host
+   host-pwd: 123qweasd
+-  cpu-core: 1
++  cpu-core: 2
+   avg_ps: 0.0295858625571 #12x12
+Index: Controller/log/controller_0810-1343.log
+===================================================================
+--- Controller/log/controller_0810-1343.log	(date 1503642236000)
++++ Controller/log/controller_0810-1343.log	(date 1503642236000)
+@@ -1,107 +0,0 @@
+-2017-08-10 13:43:57,531 Controller INFO: load configuration...
+-2017-08-10 13:43:57,533 Controller INFO: Connecting host(s)...
+-2017-08-10 13:43:57,558 paramiko.transport DEBUG: starting thread (client mode): 0x41c8dd90L
+-2017-08-10 13:43:57,558 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 13:43:57,591 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 13:43:57,591 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 13:43:57,592 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 13:43:57,592 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 13:43:57,593 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 13:43:57,593 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 13:43:57,593 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 13:43:57,652 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 13:43:57,672 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 13:43:57,675 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 13:43:57,696 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 13:43:57,697 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 13:43:57,754 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 13:43:57,775 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 13:43:57,812 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 13:43:59,863 Host  DEBUG: host2: updated
+-2017-08-10 13:43:59,864 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 13:43:59,870 paramiko.transport DEBUG: starting thread (client mode): 0x41c2b810L
+-2017-08-10 13:43:59,871 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 13:43:59,871 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 13:43:59,871 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 13:43:59,874 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 13:44:00,063 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 13:44:00,063 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 13:44:00,064 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 13:44:00,064 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 13:44:00,065 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 13:44:00,065 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 13:44:00,065 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 13:44:00,113 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 13:44:00,113 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 13:44:00,117 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 13:44:00,118 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 13:44:00,151 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 13:44:00,207 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 13:44:00,220 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 13:44:00,233 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 13:44:01,228 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 13:44:01,228 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 13:44:01,979 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 13:44:01,980 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 13:44:01,981 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 13:44:01,982 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 13:44:01,982 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 13:44:02,023 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 13:44:02,051 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 13:44:02,052 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 13:44:02,239 Host  DEBUG: host1: updated
+-2017-08-10 13:44:02,240 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 13:44:02,240 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 13:44:02,240 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 13:44:02,242 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 13:44:03,240 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 13:44:03,241 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 13:44:03,241 Controller INFO: Controller is ready
+-2017-08-10 13:44:04,282 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 13:44:04,284 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 13:44:04,289 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 13:44:04,306 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 13:44:04,311 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 13:44:04,332 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 13:44:04,371 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 13:44:04,373 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 13:44:12,958 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 13:44:12,958 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 13:44:12,958 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 13:44:12,964 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 13:44:12,965 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 13:44:12,965 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 13:44:12,971 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 13:44:12,971 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 13:44:12,971 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 13:44:12,978 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 13:44:14,010 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 13:44:14,011 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 13:44:14,014 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 13:44:14,014 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 13:44:14,014 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 13:44:14,022 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 13:44:14,033 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 13:44:14,034 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 13:44:14,036 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 13:44:14,038 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 13:44:14,040 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 13:44:14,083 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 13:44:14,956 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 13:44:14,958 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 13:44:14,959 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 13:44:14,959 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 13:44:14,976 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 13:44:15,045 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 13:44:15,050 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 13:44:15,070 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 13:44:15,073 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 13:44:15,999 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 13:44:16,003 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 13:44:19,735 Controller INFO: Disconnecting host(s)...
+-2017-08-10 13:44:19,819 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 13:44:19,835 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 13:44:19,960 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 13:44:20,000 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 13:44:20,000 Controller DEBUG: Shut down a server
+-2017-08-10 13:44:20,476 Controller INFO: Exit
+Index: Client/source.cfg
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Client/source.cfg	(date 1503642236000)
++++ Client/source.cfg	(revision )
+@@ -1,15 +1,18 @@
+-#modd = normal, test
++#mode = normal, test
+ mode: normal
+-controller_ip: 131.112.21.86
++controller_ip: 131.112.21.11
+ controller_port: 53520
+ 
+-#puzzle_mode = generator, file
+-puzzle_mode: file
++#puzzle_mode = GENERATOR, FILE
++puzzle_mode: FILE
+ puzzle_size: 12 #3, 4, 9, 12, 16
+ puzzle_file: sudoku12.txt
+ 
+ 
+ default_server_port : 51871
+-default_server_ip : 131.112.21.86
++default_server_ip : 131.112.21.33
+ 
+ log_level:  DEBUG
++
++# YES, NO
++source_update: NO
+Index: Controller/log/controller_0810-1535.log
+===================================================================
+--- Controller/log/controller_0810-1535.log	(date 1503642236000)
++++ Controller/log/controller_0810-1535.log	(date 1503642236000)
+@@ -1,100 +0,0 @@
+-2017-08-10 15:35:59,767 Controller INFO: load configuration...
+-2017-08-10 15:35:59,784 Controller INFO: Connecting host(s)...
+-2017-08-10 15:35:59,803 paramiko.transport DEBUG: starting thread (client mode): 0x3633cd90L
+-2017-08-10 15:35:59,803 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 15:35:59,811 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 15:35:59,812 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 15:35:59,813 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 15:35:59,813 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 15:35:59,813 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 15:35:59,813 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 15:35:59,813 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 15:35:59,870 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 15:35:59,871 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 15:35:59,905 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 15:35:59,975 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 15:35:59,975 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 15:35:59,991 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 15:36:00,012 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 15:36:00,040 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 15:36:02,087 Host  DEBUG: host2: updated
+-2017-08-10 15:36:02,088 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 15:36:02,093 paramiko.transport DEBUG: starting thread (client mode): 0x362db810L
+-2017-08-10 15:36:02,094 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 15:36:02,094 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 15:36:02,094 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 15:36:02,096 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 15:36:02,275 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 15:36:02,276 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 15:36:02,276 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 15:36:02,276 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 15:36:02,277 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 15:36:02,277 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 15:36:02,277 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 15:36:02,323 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 15:36:02,324 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 15:36:02,331 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 15:36:02,355 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 15:36:02,362 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 15:36:02,436 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 15:36:02,456 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 15:36:02,463 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 15:36:04,000 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 15:36:04,000 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 15:36:04,100 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 15:36:04,101 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 15:36:04,102 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 15:36:04,103 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 15:36:04,103 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 15:36:04,142 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 15:36:04,151 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 15:36:04,152 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 15:36:04,475 Host  DEBUG: host1: updated
+-2017-08-10 15:36:04,475 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 15:36:04,476 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 15:36:04,476 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 15:36:04,478 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 15:36:05,476 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 15:36:05,477 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 15:36:05,477 Controller INFO: Controller is ready
+-2017-08-10 15:36:06,570 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 15:36:06,570 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 15:36:06,577 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 15:36:06,593 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 15:36:06,594 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 15:36:06,626 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 15:36:06,660 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 15:36:06,666 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 15:36:24,153 Host  DEBUG: host2: updated
+-2017-08-10 15:36:24,154 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 15:36:24,155 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 15:36:24,158 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 15:36:24,169 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 15:36:26,179 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 15:36:26,179 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 15:36:26,182 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 15:36:26,213 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 15:36:26,213 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 15:36:26,273 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 15:36:26,359 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 15:36:26,366 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 15:36:26,660 Host  DEBUG: host1: updated
+-2017-08-10 15:36:26,662 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 15:36:26,665 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 15:36:26,666 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 15:36:26,676 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 15:36:28,678 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 15:36:28,679 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 15:36:28,686 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 15:36:28,694 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 15:36:28,698 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 15:36:28,728 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 15:36:28,778 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 15:36:28,785 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 15:36:44,490 Controller INFO: Disconnecting host(s)...
+-2017-08-10 15:36:44,594 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 15:36:44,624 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 15:36:44,684 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 15:36:44,712 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 15:36:44,712 Controller DEBUG: Shut down a server
+-2017-08-10 15:36:45,100 Controller INFO: Exit
+Index: Controller/controller.cfg
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Controller/controller.cfg	(date 1503642236000)
++++ Controller/controller.cfg	(revision )
+@@ -1,4 +1,4 @@
+-controller_ip:      131.112.21.86
++controller_ip:      131.112.21.11
+ controller_port:    53520
+ 
+ # CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET
+@@ -7,4 +7,4 @@
+ 
+ 
+ # Update mode: SSH, SOURCE, HTTP
+-host_update: SOURCE
+\ No newline at end of file
++host_update: HTTP
+\ No newline at end of file
+Index: Controller/Host_Object.py
+===================================================================
+--- Controller/Host_Object.py	(date 1503642236000)
++++ Controller/host_thread.py	(revision )
+@@ -1,11 +1,11 @@
+ import paramiko
+ import subprocess
+-from sys import maxint
+ import re
+-from platform import system
+ import time
+ import logging
+ import threading
++import httplib
++import yaml
+ 
+ SERVICE_NAME = 'Sudoku_Service'
+ 
+@@ -13,6 +13,7 @@
+ SSH_MODE = 'SSH'
+ SOURCE_MODE = 'SOURCE'
+ HTTP_MODE = 'HTTP'
++
+ # TODO: update by running http server in host
+ 
+ DEFAULT_RTT = 0.00001
+@@ -20,13 +21,14 @@
+ SOURCE_TTL = 60
+ 
+ 
+-class Host(threading.Thread):
+-    def __init__(self, host_name, host_ip, server_port, user, password, interval, num_of_cpu, avg_pc,
++class Host_Thread(threading.Thread):
++    def __init__(self, host_name, host_ip, server_port, http_port, user, password, interval, num_of_cpu, avg_pc,
+                  update_mode=SSH_MODE):
+         threading.Thread.__init__(self)
+         self.host_name = host_name
+-        self.host = host_ip
++        self.host_ip = host_ip
+         self.port = server_port
++        self.http_port = http_port
+ 
+         self.cpu = None
+         self.mem = None
+@@ -37,7 +39,7 @@
+         self.last_update = None
+         self.user = user
+         self.password = password
+-        self.ssh_con = None
++        self.connection = None
+         self.is_connected = False
+         self.isRun = False
+ 
+@@ -46,7 +48,7 @@
+ 
+         self.avg_process_time = avg_pc
+ 
+-        assert update_mode == SSH_MODE or update_mode == SOURCE_MODE, 'Invalid update mode'
++        assert update_mode in {SSH_MODE, SOURCE_MODE, HTTP_MODE}, 'Invalid update mode'
+         self.update_mode = update_mode
+ 
+         self.temp_comp = avg_pc
+@@ -56,31 +58,42 @@
+ 
+         global logger
+         logger = logging.getLogger('Host ')
+-        self.ssh_connect()
++
++        if self.update_mode == HTTP_MODE:
++            self.http_connect()
++        else:
++            self.ssh_connect()
+ 
+-        # self.rtt = self.ping_controller()
++            # self.rtt = self.ping_controller()
+ 
+-        # if self.isConnected:
+-        #    self.update()
++            # if self.isConnected:
++            #    self.update()
+ 
++    def http_connect(self):
++        try:
++            self.connection = httplib.HTTPConnection(self.host_ip, port=self.http_port)
++            self.is_connected = True
++        except httplib.HTTPException as e:
++            logger.error(self.host_name + ": http_connect Exception:", e.message)
++            self.is_connected = False
++        except:
++            logger.error(self.host_name + ": connection fail")
++            self.is_connected = False
++
+     def ssh_connect(self):
+         try:
+             # Connect SSH
+-            self.ssh_con = paramiko.SSHClient()
+-            self.ssh_con.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+-            self.ssh_con.load_system_host_keys()
+-            self.ssh_con.connect(self.host, username=self.user, password=self.password, timeout=10)  # , None)
++            self.connection = paramiko.SSHClient()
++            self.connection.set_missing_host_key_policy(paramiko.AutoAddPolicy())
++            self.connection.load_system_host_keys()
++            self.connection.connect(self.host_ip, username=self.user, password=self.password, timeout=10)  # , None)
+             self.is_connected = True
+         except paramiko.ssh_exception.SSHException as e:
+             logger.error(self.host_name + ": ssh_connect ssh Exception:", e.message)
+             self.is_connected = False
+         except:
+             logger.error(self.host_name + ": connection fail")
+-
+-    def close(self):
+-        self.is_connected = False
+-        self.ssh_con.close()
+-        logger.debug(self.host + ': closed')
++            self.is_connected = False
+ 
+     def ping_controller(self, count=3, timeout=2, pck_size=1024):
+         ping_result = None
+@@ -94,7 +107,7 @@
+             # else:
+             # for else assume linux
+             ping_out = subprocess.check_output(
+-                ['ping', self.host, '-c', str(count), '-s', str(pck_size), '-W', str(timeout)]).splitlines()
++                ['ping', self.host_ip, '-c', str(count), '-s', str(pck_size), '-W', str(timeout)]).splitlines()
+ 
+             len_ping = len(ping_out)
+ 
+@@ -111,7 +124,6 @@
+                 _INDEX_AVG_RTT = 7
+                 avg_rtt = float(ping_result[_INDEX_AVG_RTT])
+ 
+-
+         except subprocess.CalledProcessError as e:
+             logger.error(self.host_name + ': CalledProcessError: ' + e.message)
+         except ValueError:
+@@ -122,6 +134,8 @@
+             return avg_rtt
+ 
+     def ping_source(self, source, count=2, timeout=2, pck_size=1024):
++        '''SSH MODE'''
++        assert self.update_mode == SSH_MODE, 'Wrong mode'
+         avg_rtt = 0
+ 
+         if not self.is_connected:
+@@ -131,7 +145,7 @@
+             return avg_rtt
+         try:
+             command = "ping " + source + " -c" + str(count) + " -s" + str(pck_size) + " -W" + str(timeout)
+-            _, stdout, stderr = self.ssh_con.exec_command(command)
++            _, stdout, stderr = self.connection.exec_command(command)
+             #
+             # PING 131.112.21.80 (131.112.21.80) 1024(1052) bytes of data.
+             # 1032 bytes from 131.112.21.80: icmp_seq=1 ttl=64 time=0.280 ms
+@@ -158,7 +172,7 @@
+         finally:
+             return avg_rtt
+ 
+-    def update_rtt_source_list(self):
++    def update_rtt_source_list(self, sources=None):
+         # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
+         for sr in self.source_list:
+             if time.time() - sr['last_connect'] > SOURCE_TTL:
+@@ -170,8 +184,23 @@
+                     sr['rtt'] = sr['sum_rtt'] / sr['count']
+                     sr['sum_rtt'] = sr['rtt']
+                     sr['count'] = 1
++                elif self.update_mode == HTTP_MODE:
++                    if sources is not None:
++                        # list = [s1:{ip: , rtt: }, s2:{ip:, rtt:}, ...]
++                        for s, s_data in sources.items():
++                            if sr['ip'] == s_data['ip']:
++                                sr['rtt'] = s_data['rtt']
++                    else:
++                        logger.warning('No sources list from host')
+ 
+     def get_source_rtt(self, source):
++        '''
++        Measure rtt from host to source
++        if source exists in maintaining list, get from the list
++        else add a new source and measure rtt newly
++        :param source: ip
++        :return: round-trip-time from host to source
++        '''
+         # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
+         new_source = True
+         rtt = 0
+@@ -188,6 +217,11 @@
+         return rtt
+ 
+     def vmstat(self):
++        '''
++        Must run in SSH MODE
++        Get free memory and idle cpu using vmstat command through ssh connection
++        '''
++        assert self.update_mode == SSH_MODE, 'Wrong mode'
+         # find free mem and idle cpu
+         free_mem, cpu_idle = None, None
+         if not self.is_connected:
+@@ -196,7 +230,7 @@
+         if self.is_connected:
+             try:
+                 command = "vmstat 2 2"
+-                _, stdout, stderr = self.ssh_con.exec_command(command)
++                _, stdout, stderr = self.connection.exec_command(command)
+ 
+                 #
+                 #       procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----
+@@ -222,6 +256,11 @@
+         return free_mem, cpu_idle
+ 
+     def pc_count(self):
++        '''
++        Must run in SSH MODE'
++        cont number of process using ps and grep command through ssh connection
++        '''
++        assert self.update_mode == SSH_MODE, 'Wrong mode'
+         # ps aux | wc -l
+         process_count = None
+         if not self.is_connected:
+@@ -231,7 +270,7 @@
+             try:
+                 command = "ps aux | grep " + SERVICE_NAME + " | grep " + self.user + " | wc -l"  # show num of all processes
+                 # command = 'pgrep ' + SERVICE_NAME + ' | wc -l'
+-                _, stdout, stderr = self.ssh_con.exec_command(command)
++                _, stdout, stderr = self.connection.exec_command(command)
+ 
+                 # 12 --> #of proc
+ 
+@@ -250,27 +289,72 @@
+ 
+             return process_count
+ 
++    def update_by_http(self):
++        '''
++        Must runin HTTP_MODE
++        Get http response then translate from yaml format to host status
++        '''
++        assert self.update_mode == HTTP_MODE, 'Wrong mode'
++        if not self.is_connected:
++            self.http_connect()
++        try:
++            if self.is_connected:
++                self.connection = httplib.HTTPConnection(self.host_ip, port=self.http_port)
++
++                self.connection.request('GET', '/')
++                resp = self.connection.getresponse()
++                # resp ==> YAML format
++                # proc: 0\n mem: 0\n cpu: 0.0\n comp: 0.0\n p-num: 0
++                # sources:\n s1:\n  ip: 127.0.0.1\n  rtt: 0\n  s-sum: 0
++                #         \n s2:\n  ip: 127.0.0.1\n  rtt: 0\n  s-sum: 0
++                assert resp.status == httplib.OK, 'Response error'
++                data = yaml.load(resp.read())
++                self.mem, self.cpu = data['mem'], data['cpu']
++                self.num_of_proc = data['proc']
++                self.update_rtt_source_list(sources=data['sources'])
++                # for s, s_data in data['sources'].items():
++                #    print s_data['ip'], s_data['rtt']
++                #    print '\n'
++
++        except yaml.YAMLError:
++            logger.error('HTTP respond not in YAML format')
++        except Exception as e:
++            logger.error('Cannot update host: ' + e.message)
++
+     def update(self):
++        '''
++        update host status with controller interval
++        memory, idle cpu, number of process, rtt of each source
++        '''
+         logger.debug(self.host_name + ': updated')
+         self.last_update = time.localtime()
+ 
+-        if not self.is_connected:
+-            self.ssh_connect()
+-        if self.is_connected:
+-            self.mem, self.cpu = self.vmstat()
+-            self.num_of_proc = self.pc_count()
++        if self.update_mode == SSH_MODE:
++            if not self.is_connected:
++                self.ssh_connect()
++            if self.is_connected:
++                self.mem, self.cpu = self.vmstat()
++                self.num_of_proc = self.pc_count()
++                self.update_rtt_source_list()
+ 
+         if self.update_mode == SOURCE_MODE or self.is_connected:
+             self.update_rtt_source_list()
++            # self.update_avg_process_time() #Dont update it
+ 
+-        self.update_avg_process_time()
+-
+-        # print  '{}, num_proc = {}, comp = {}, commu = {}'.format(self.host_name, self.num_of_proc, self.avg_process_time, self.get_source_rtt('131.112.21.86'))
+-
+-    def accept_workload(self):
+-        self.num_of_proc += 1
++        if self.update_mode == HTTP_MODE:
++            if not self.is_connected:
++                self.http_connect()
++            if self.is_connected:
++                self.update_by_http()
+ 
+     def update_latency(self, source, commu, comp):
++        '''
++        Once controller receives update msg from source order this command
++        :param source: ip
++        :param commu: communication latency
++        :param comp:  computation latency
++        :return: None
++        '''
+         # ---Communnication-------
+         # source = {'ip':,'last_connect':,'rtt':,'count':,'sum_rtt':}
+ 
+@@ -291,11 +375,19 @@
+             self.event.wait(self.update_interval)
+         self.close()
+ 
+-    def terminate(self):
+-        self.isRun = False
+-        self.event.set()
+-
+     def update_avg_process_time(self):
+         self.avg_process_time = self.temp_comp / self.temp_comp_counter
+         self.temp_comp_counter = 1
+         self.temp_comp = self.avg_process_time
++
++    def accept_workload(self):
++        self.num_of_proc += 1
++
++    def terminate(self):
++        self.isRun = False
++        self.event.set()
++
++    def close(self):
++        self.is_connected = False
++        self.connection.close()
++        logger.debug(self.host_ip + ': closed')
+Index: Controller/log/controller_0810-1652.log
+===================================================================
+--- Controller/log/controller_0810-1652.log	(date 1503642236000)
++++ Controller/log/controller_0810-1652.log	(date 1503642236000)
+@@ -1,214 +0,0 @@
+-2017-08-10 16:52:31,796 Controller INFO: load configuration...
+-2017-08-10 16:52:31,798 Controller INFO: Connecting host(s)...
+-2017-08-10 16:52:31,805 paramiko.transport DEBUG: starting thread (client mode): 0x4c811e10L
+-2017-08-10 16:52:31,805 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 16:52:31,814 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 16:52:31,814 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 16:52:31,815 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 16:52:31,815 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 16:52:31,815 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 16:52:31,816 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 16:52:31,816 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 16:52:31,873 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 16:52:31,874 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 16:52:31,906 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 16:52:31,907 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 16:52:31,912 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:52:31,924 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 16:52:31,939 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:52:31,981 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 16:52:34,007 Host  DEBUG: host2: updated
+-2017-08-10 16:52:34,012 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 16:52:34,019 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 16:52:34,019 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 16:52:34,020 paramiko.transport DEBUG: starting thread (client mode): 0x4c7b1890L
+-2017-08-10 16:52:34,021 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 16:52:34,021 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 16:52:34,022 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 16:52:34,024 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 16:52:34,025 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 16:52:34,025 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 16:52:34,025 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 16:52:34,025 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 16:52:34,025 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 16:52:34,089 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 16:52:34,090 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 16:52:34,121 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 16:52:34,122 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 16:52:34,126 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:52:34,138 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 16:52:34,138 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:52:34,149 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 16:52:34,258 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 16:52:34,258 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 16:52:36,028 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 16:52:36,028 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 16:52:36,029 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 16:52:36,070 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 16:52:36,070 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 16:52:36,095 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 16:52:36,113 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 16:52:36,113 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 16:52:36,170 Host  DEBUG: host1: updated
+-2017-08-10 16:52:36,171 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 16:52:36,171 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 16:52:36,171 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 16:52:36,172 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 16:52:37,171 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 16:52:37,172 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 16:52:37,172 Controller INFO: Controller is ready
+-2017-08-10 16:52:38,210 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 16:52:38,210 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 16:52:38,211 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 16:52:38,260 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 16:52:38,269 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 16:52:38,335 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 16:52:38,383 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 16:52:38,383 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 16:52:56,114 Host  DEBUG: host2: updated
+-2017-08-10 16:52:56,118 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 16:52:56,174 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 16:52:56,174 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 16:52:56,218 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 16:52:58,291 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 16:52:58,290 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 16:52:58,337 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 16:52:58,341 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 16:52:58,342 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 16:52:58,384 Host  DEBUG: host1: updated
+-2017-08-10 16:52:58,384 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 16:52:58,385 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 16:52:58,385 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 16:52:58,385 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 16:52:58,389 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 16:52:58,459 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 16:52:58,525 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 16:53:00,450 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 16:53:00,451 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 16:53:00,464 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 16:53:00,550 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 16:53:00,557 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 16:53:00,681 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 16:53:00,834 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 16:53:00,934 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 16:53:18,459 Host  DEBUG: host2: updated
+-2017-08-10 16:53:18,466 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 16:53:18,488 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 16:53:18,490 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 16:53:18,607 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 16:53:20,630 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 16:53:20,631 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 16:53:20,631 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 16:53:20,632 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 16:53:20,632 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 16:53:20,679 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 16:53:20,689 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 16:53:20,689 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 16:53:20,834 Host  DEBUG: host1: updated
+-2017-08-10 16:53:20,835 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 16:53:20,835 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 16:53:20,835 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 16:53:20,837 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 16:53:22,851 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 16:53:22,852 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 16:53:22,852 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 16:53:22,890 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 16:53:22,891 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 16:53:22,917 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 16:53:22,954 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 16:53:22,968 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 16:53:39,844 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:40,689 Host  DEBUG: host2: updated
+-2017-08-10 16:53:40,690 paramiko.transport DEBUG: [chan 6] Max packet in: 32768 bytes
+-2017-08-10 16:53:40,728 paramiko.transport DEBUG: [chan 6] Max packet out: 32768 bytes
+-2017-08-10 16:53:40,729 paramiko.transport DEBUG: Secsh channel 6 opened.
+-2017-08-10 16:53:40,758 paramiko.transport DEBUG: [chan 6] Sesch channel 6 request ok
+-2017-08-10 16:53:41,598 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:42,778 paramiko.transport DEBUG: [chan 6] EOF received (6)
+-2017-08-10 16:53:42,779 paramiko.transport DEBUG: [chan 6] EOF sent (6)
+-2017-08-10 16:53:42,779 paramiko.transport DEBUG: [chan 7] Max packet in: 32768 bytes
+-2017-08-10 16:53:42,817 paramiko.transport DEBUG: [chan 7] Max packet out: 32768 bytes
+-2017-08-10 16:53:42,817 paramiko.transport DEBUG: Secsh channel 7 opened.
+-2017-08-10 16:53:42,911 paramiko.transport DEBUG: [chan 7] Sesch channel 7 request ok
+-2017-08-10 16:53:42,913 paramiko.transport DEBUG: [chan 7] EOF received (7)
+-2017-08-10 16:53:42,913 paramiko.transport DEBUG: [chan 7] EOF sent (7)
+-2017-08-10 16:53:42,960 Host  DEBUG: host1: updated
+-2017-08-10 16:53:42,960 paramiko.transport DEBUG: [chan 6] Max packet in: 32768 bytes
+-2017-08-10 16:53:42,961 paramiko.transport DEBUG: [chan 6] Max packet out: 32768 bytes
+-2017-08-10 16:53:42,961 paramiko.transport DEBUG: Secsh channel 6 opened.
+-2017-08-10 16:53:42,962 paramiko.transport DEBUG: [chan 6] Sesch channel 6 request ok
+-2017-08-10 16:53:43,528 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:44,975 paramiko.transport DEBUG: [chan 6] EOF received (6)
+-2017-08-10 16:53:44,976 paramiko.transport DEBUG: [chan 6] EOF sent (6)
+-2017-08-10 16:53:44,976 paramiko.transport DEBUG: [chan 7] Max packet in: 32768 bytes
+-2017-08-10 16:53:45,014 paramiko.transport DEBUG: [chan 7] Max packet out: 32768 bytes
+-2017-08-10 16:53:45,015 paramiko.transport DEBUG: Secsh channel 7 opened.
+-2017-08-10 16:53:45,041 paramiko.transport DEBUG: [chan 7] Sesch channel 7 request ok
+-2017-08-10 16:53:45,115 paramiko.transport DEBUG: [chan 7] EOF received (7)
+-2017-08-10 16:53:45,115 paramiko.transport DEBUG: [chan 7] EOF sent (7)
+-2017-08-10 16:53:45,356 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:47,537 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:49,262 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:51,949 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:53,748 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:55,388 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:53:57,470 Controller ERROR: Request error: invalid literal for int() with base 10: '2 192'
+-2017-08-10 16:54:02,913 Host  DEBUG: host2: updated
+-2017-08-10 16:54:02,914 paramiko.transport DEBUG: [chan 8] Max packet in: 32768 bytes
+-2017-08-10 16:54:02,914 paramiko.transport DEBUG: [chan 8] Max packet out: 32768 bytes
+-2017-08-10 16:54:02,915 paramiko.transport DEBUG: Secsh channel 8 opened.
+-2017-08-10 16:54:02,977 paramiko.transport DEBUG: [chan 8] Sesch channel 8 request ok
+-2017-08-10 16:54:04,952 paramiko.transport DEBUG: [chan 8] EOF received (8)
+-2017-08-10 16:54:04,962 paramiko.transport DEBUG: [chan 9] Max packet in: 32768 bytes
+-2017-08-10 16:54:05,028 paramiko.transport DEBUG: [chan 8] EOF sent (8)
+-2017-08-10 16:54:05,029 paramiko.transport DEBUG: [chan 9] Max packet out: 32768 bytes
+-2017-08-10 16:54:05,029 paramiko.transport DEBUG: Secsh channel 9 opened.
+-2017-08-10 16:54:05,093 paramiko.transport DEBUG: [chan 9] Sesch channel 9 request ok
+-2017-08-10 16:54:05,117 Host  DEBUG: host1: updated
+-2017-08-10 16:54:05,119 paramiko.transport DEBUG: [chan 8] Max packet in: 32768 bytes
+-2017-08-10 16:54:05,122 paramiko.transport DEBUG: [chan 8] Max packet out: 32768 bytes
+-2017-08-10 16:54:05,122 paramiko.transport DEBUG: Secsh channel 8 opened.
+-2017-08-10 16:54:05,122 paramiko.transport DEBUG: [chan 9] EOF received (9)
+-2017-08-10 16:54:05,122 paramiko.transport DEBUG: [chan 9] EOF sent (9)
+-2017-08-10 16:54:05,186 paramiko.transport DEBUG: [chan 8] Sesch channel 8 request ok
+-2017-08-10 16:54:07,229 paramiko.transport DEBUG: [chan 9] Max packet in: 32768 bytes
+-2017-08-10 16:54:07,230 paramiko.transport DEBUG: [chan 8] EOF received (8)
+-2017-08-10 16:54:07,239 paramiko.transport DEBUG: [chan 8] EOF sent (8)
+-2017-08-10 16:54:07,271 paramiko.transport DEBUG: [chan 9] Max packet out: 32768 bytes
+-2017-08-10 16:54:07,280 paramiko.transport DEBUG: Secsh channel 9 opened.
+-2017-08-10 16:54:07,322 paramiko.transport DEBUG: [chan 9] Sesch channel 9 request ok
+-2017-08-10 16:54:07,414 paramiko.transport DEBUG: [chan 9] EOF received (9)
+-2017-08-10 16:54:07,414 paramiko.transport DEBUG: [chan 9] EOF sent (9)
+-2017-08-10 16:54:25,123 Host  DEBUG: host2: updated
+-2017-08-10 16:54:25,124 paramiko.transport DEBUG: [chan 10] Max packet in: 32768 bytes
+-2017-08-10 16:54:25,164 paramiko.transport DEBUG: [chan 10] Max packet out: 32768 bytes
+-2017-08-10 16:54:25,169 paramiko.transport DEBUG: Secsh channel 10 opened.
+-2017-08-10 16:54:25,202 paramiko.transport DEBUG: [chan 10] Sesch channel 10 request ok
+-2017-08-10 16:54:27,243 paramiko.transport DEBUG: [chan 11] Max packet in: 32768 bytes
+-2017-08-10 16:54:27,243 paramiko.transport DEBUG: [chan 10] EOF received (10)
+-2017-08-10 16:54:27,305 paramiko.transport DEBUG: [chan 10] EOF sent (10)
+-2017-08-10 16:54:27,352 paramiko.transport DEBUG: [chan 11] Max packet out: 32768 bytes
+-2017-08-10 16:54:27,352 paramiko.transport DEBUG: Secsh channel 11 opened.
+-2017-08-10 16:54:27,367 paramiko.transport DEBUG: [chan 11] Sesch channel 11 request ok
+-2017-08-10 16:54:27,418 Host  DEBUG: host1: updated
+-2017-08-10 16:54:27,419 paramiko.transport DEBUG: [chan 10] Max packet in: 32768 bytes
+-2017-08-10 16:54:27,419 paramiko.transport DEBUG: [chan 10] Max packet out: 32768 bytes
+-2017-08-10 16:54:27,420 paramiko.transport DEBUG: Secsh channel 10 opened.
+-2017-08-10 16:54:27,421 paramiko.transport DEBUG: [chan 10] Sesch channel 10 request ok
+-2017-08-10 16:54:27,439 paramiko.transport DEBUG: [chan 11] EOF received (11)
+-2017-08-10 16:54:27,442 paramiko.transport DEBUG: [chan 11] EOF sent (11)
+-2017-08-10 16:54:29,440 paramiko.transport DEBUG: [chan 10] EOF received (10)
+-2017-08-10 16:54:29,440 paramiko.transport DEBUG: [chan 10] EOF sent (10)
+-2017-08-10 16:54:29,440 paramiko.transport DEBUG: [chan 11] Max packet in: 32768 bytes
+-2017-08-10 16:54:29,478 paramiko.transport DEBUG: [chan 11] Max packet out: 32768 bytes
+-2017-08-10 16:54:29,479 paramiko.transport DEBUG: Secsh channel 11 opened.
+-2017-08-10 16:54:29,505 paramiko.transport DEBUG: [chan 11] Sesch channel 11 request ok
+-2017-08-10 16:54:29,567 paramiko.transport DEBUG: [chan 11] EOF received (11)
+-2017-08-10 16:54:29,567 paramiko.transport DEBUG: [chan 11] EOF sent (11)
+-2017-08-10 16:54:32,966 Controller INFO: Disconnecting host(s)...
+-2017-08-10 16:54:33,038 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 16:54:33,048 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 16:54:33,096 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 16:54:33,115 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 16:54:33,115 Controller DEBUG: Shut down a server
+-2017-08-10 16:54:33,576 Controller INFO: Exit
+Index: Serever/server.cfg
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Serever/server.cfg	(date 1503642236000)
++++ Serever/server.cfg	(revision )
+@@ -1,8 +1,13 @@
+-host_name: host1
+-controller_ip: 131.112.21.86
+-controller_port: 53520
+-server_ip: 131.112.21.86
+-server_port: 51871
+-log_level:  DEBUG
++host_name:      host2
++
++controller_ip:  131.112.21.11
++controller_port:    53520
++
++user:           host
++server_ip:      131.112.21.11
++server_port:    51871
++http_port:      8081
++
++log_level:          DEBUG
+ console_log_level:  DEBUG
+ file_log_level:     DEBUG
+Index: Controller/log/controller_0810-1700.log
+===================================================================
+--- Controller/log/controller_0810-1700.log	(date 1503642236000)
++++ Controller/log/controller_0810-1700.log	(date 1503642236000)
+@@ -1,134 +0,0 @@
+-2017-08-10 17:00:34,105 Controller INFO: load configuration...
+-2017-08-10 17:00:34,107 Controller INFO: Connecting host(s)...
+-2017-08-10 17:00:34,116 paramiko.transport DEBUG: starting thread (client mode): 0x34c6de10L
+-2017-08-10 17:00:34,116 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 17:00:34,125 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 17:00:34,125 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 17:00:34,126 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 17:00:34,126 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 17:00:34,127 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 17:00:34,127 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 17:00:34,127 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 17:00:34,183 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 17:00:34,183 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 17:00:34,217 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 17:00:34,218 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 17:00:34,223 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:00:34,235 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 17:00:34,250 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:00:34,292 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 17:00:36,319 Host  DEBUG: host2: updated
+-2017-08-10 17:00:36,322 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 17:00:36,330 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 17:00:36,330 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 17:00:36,331 paramiko.transport DEBUG: starting thread (client mode): 0x34c0c890L
+-2017-08-10 17:00:36,331 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 17:00:36,331 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 17:00:36,331 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 17:00:36,332 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 17:00:36,332 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 17:00:36,333 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 17:00:36,333 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 17:00:36,333 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 17:00:36,333 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 17:00:36,402 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 17:00:36,403 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 17:00:36,432 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 17:00:36,433 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 17:00:36,442 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:00:36,453 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 17:00:36,465 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:00:36,476 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 17:00:36,588 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 17:00:36,588 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 17:00:38,335 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 17:00:38,336 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 17:00:38,337 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 17:00:38,337 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 17:00:38,337 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 17:00:38,375 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 17:00:38,385 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 17:00:38,386 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 17:00:38,483 Host  DEBUG: host1: updated
+-2017-08-10 17:00:38,483 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 17:00:38,483 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 17:00:38,483 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 17:00:38,485 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 17:00:39,484 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 17:00:39,484 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 17:00:39,484 Controller INFO: Controller is ready
+-2017-08-10 17:00:40,490 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 17:00:40,491 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 17:00:40,495 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 17:00:40,530 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 17:00:40,532 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 17:00:40,572 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 17:00:40,643 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 17:00:40,682 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 17:00:45,238 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:00:45,242 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 17:00:45,266 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 17:00:45,266 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 17:00:45,316 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 17:00:46,455 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 17:00:46,454 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 17:00:46,455 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 17:00:46,455 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 17:00:46,463 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 17:00:46,464 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 17:00:47,485 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 17:00:47,500 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 17:00:49,035 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:00:51,270 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:00:53,087 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:00:54,738 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:00:56,550 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:00:58,386 Host  DEBUG: host2: updated
+-2017-08-10 17:00:58,386 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 17:00:58,418 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 17:00:58,418 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 17:00:58,451 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 17:00:58,897 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:01:00,494 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 17:01:00,494 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 17:01:00,495 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:01:00,495 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 17:01:00,495 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 17:01:00,495 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 17:01:00,535 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 17:01:00,643 Host  DEBUG: host1: updated
+-2017-08-10 17:01:00,644 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 17:01:00,644 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 17:01:00,644 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 17:01:00,646 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 17:01:01,537 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 17:01:01,538 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 17:01:01,538 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 17:01:01,538 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 17:01:01,538 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 17:01:01,575 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 17:01:01,595 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 17:01:01,595 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 17:01:02,128 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:01:02,682 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 17:01:02,683 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 17:01:02,683 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 17:01:02,722 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 17:01:02,723 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 17:01:02,748 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 17:01:03,764 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 17:01:03,764 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 17:01:03,765 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 17:01:03,802 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 17:01:03,803 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 17:01:03,829 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 17:01:03,909 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 17:01:03,909 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 17:01:04,767 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:01:04,830 Controller INFO: Disconnecting host(s)...
+-2017-08-10 17:01:04,868 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 17:01:04,897 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 17:01:05,012 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 17:01:05,039 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 17:01:05,039 Controller DEBUG: Shut down a server
+-2017-08-10 17:01:05,268 Controller INFO: Exit
+Index: Controller/log/controller_0810-1702.log
+===================================================================
+--- Controller/log/controller_0810-1702.log	(date 1503642236000)
++++ Controller/log/controller_0810-1702.log	(date 1503642236000)
+@@ -1,287 +0,0 @@
+-2017-08-10 17:02:00,631 Controller INFO: load configuration...
+-2017-08-10 17:02:00,633 Controller INFO: Connecting host(s)...
+-2017-08-10 17:02:00,640 paramiko.transport DEBUG: starting thread (client mode): 0xd701ae10L
+-2017-08-10 17:02:00,640 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 17:02:00,645 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 17:02:00,646 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 17:02:00,651 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 17:02:00,651 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 17:02:00,651 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 17:02:00,652 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 17:02:00,652 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 17:02:00,678 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 17:02:00,679 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 17:02:00,709 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 17:02:00,711 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 17:02:00,719 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:02:00,731 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 17:02:00,743 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:02:00,785 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 17:02:02,812 Host  DEBUG: host2: updated
+-2017-08-10 17:02:02,813 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 17:02:02,819 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 17:02:02,819 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 17:02:02,820 paramiko.transport DEBUG: starting thread (client mode): 0xd6fb9490L
+-2017-08-10 17:02:02,821 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 17:02:02,821 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 17:02:02,821 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 17:02:02,822 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 17:02:02,822 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 17:02:02,822 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 17:02:02,822 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 17:02:02,822 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 17:02:02,842 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 17:02:02,889 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 17:02:02,890 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 17:02:02,921 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 17:02:02,922 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 17:02:02,926 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:02:02,937 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 17:02:02,938 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 17:02:02,949 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 17:02:03,052 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 17:02:03,052 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 17:02:04,825 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 17:02:04,826 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 17:02:04,826 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 17:02:04,827 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 17:02:04,827 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 17:02:04,867 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 17:02:04,877 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 17:02:04,878 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 17:02:04,963 Host  DEBUG: host1: updated
+-2017-08-10 17:02:04,963 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 17:02:04,963 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 17:02:04,963 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 17:02:04,965 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 17:02:05,964 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 17:02:05,964 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 17:02:05,964 Controller INFO: Controller is ready
+-2017-08-10 17:02:07,036 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 17:02:07,036 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 17:02:07,111 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 17:02:07,212 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 17:02:07,219 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 17:02:07,301 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 17:02:07,394 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 17:02:07,463 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 17:02:12,278 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:02:12,306 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 17:02:12,326 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 17:02:12,326 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 17:02:12,378 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 17:02:13,463 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 17:02:13,463 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 17:02:13,463 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 17:02:13,470 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 17:02:13,476 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 17:02:13,477 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 17:02:14,546 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 17:02:14,565 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 17:02:24,878 Host  DEBUG: host2: updated
+-2017-08-10 17:02:24,902 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 17:02:24,926 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 17:02:24,930 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 17:02:25,018 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 17:02:26,976 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 17:02:26,976 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 17:02:26,983 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 17:02:27,026 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 17:02:27,030 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 17:02:27,117 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 17:02:27,399 Host  DEBUG: host1: updated
+-2017-08-10 17:02:27,405 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 17:02:27,435 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 17:02:27,439 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 17:02:27,495 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 17:02:28,170 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 17:02:28,166 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 17:02:28,254 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 17:02:28,293 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 17:02:28,310 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 17:02:28,364 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 17:02:28,478 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 17:02:28,520 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 17:02:29,557 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 17:02:29,557 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 17:02:29,583 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 17:02:29,616 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 17:02:29,624 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 17:02:29,666 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 17:02:30,648 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 17:02:30,650 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 17:02:30,651 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 17:02:30,712 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 17:02:30,722 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 17:02:30,751 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 17:02:30,821 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 17:02:30,881 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 17:02:40,315 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:02:47,456 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:02:48,479 Host  DEBUG: host2: updated
+-2017-08-10 17:02:48,479 paramiko.transport DEBUG: [chan 6] Max packet in: 32768 bytes
+-2017-08-10 17:02:48,493 paramiko.transport DEBUG: [chan 6] Max packet out: 32768 bytes
+-2017-08-10 17:02:48,494 paramiko.transport DEBUG: Secsh channel 6 opened.
+-2017-08-10 17:02:48,514 paramiko.transport DEBUG: [chan 6] Sesch channel 6 request ok
+-2017-08-10 17:02:50,535 paramiko.transport DEBUG: [chan 7] Max packet in: 32768 bytes
+-2017-08-10 17:02:50,535 paramiko.transport DEBUG: [chan 6] EOF received (6)
+-2017-08-10 17:02:50,567 paramiko.transport DEBUG: [chan 6] EOF sent (6)
+-2017-08-10 17:02:50,608 paramiko.transport DEBUG: [chan 7] Max packet out: 32768 bytes
+-2017-08-10 17:02:50,608 paramiko.transport DEBUG: Secsh channel 7 opened.
+-2017-08-10 17:02:50,685 paramiko.transport DEBUG: [chan 7] Sesch channel 7 request ok
+-2017-08-10 17:02:50,821 Host  DEBUG: host1: updated
+-2017-08-10 17:02:50,821 paramiko.transport DEBUG: [chan 6] Max packet in: 32768 bytes
+-2017-08-10 17:02:50,828 paramiko.transport DEBUG: [chan 6] Max packet out: 32768 bytes
+-2017-08-10 17:02:50,838 paramiko.transport DEBUG: Secsh channel 6 opened.
+-2017-08-10 17:02:50,894 paramiko.transport DEBUG: [chan 6] Sesch channel 6 request ok
+-2017-08-10 17:02:51,632 paramiko.transport DEBUG: [chan 7] EOF received (7)
+-2017-08-10 17:02:51,633 paramiko.transport DEBUG: [chan 8] Max packet in: 32768 bytes
+-2017-08-10 17:02:51,633 paramiko.transport DEBUG: [chan 7] EOF sent (7)
+-2017-08-10 17:02:51,638 paramiko.transport DEBUG: [chan 8] Max packet out: 32768 bytes
+-2017-08-10 17:02:51,638 paramiko.transport DEBUG: Secsh channel 8 opened.
+-2017-08-10 17:02:51,681 paramiko.transport DEBUG: [chan 8] Sesch channel 8 request ok
+-2017-08-10 17:02:51,702 paramiko.transport DEBUG: [chan 8] EOF received (8)
+-2017-08-10 17:02:51,726 paramiko.transport DEBUG: [chan 8] EOF sent (8)
+-2017-08-10 17:02:52,900 paramiko.transport DEBUG: [chan 6] EOF received (6)
+-2017-08-10 17:02:53,078 paramiko.transport DEBUG: [chan 6] EOF sent (6)
+-2017-08-10 17:02:52,902 paramiko.transport DEBUG: [chan 7] Max packet in: 32768 bytes
+-2017-08-10 17:02:53,128 paramiko.transport DEBUG: [chan 7] Max packet out: 32768 bytes
+-2017-08-10 17:02:53,128 paramiko.transport DEBUG: Secsh channel 7 opened.
+-2017-08-10 17:02:53,129 paramiko.transport DEBUG: [chan 7] Sesch channel 7 request ok
+-2017-08-10 17:02:54,143 paramiko.transport DEBUG: [chan 7] EOF received (7)
+-2017-08-10 17:02:54,143 paramiko.transport DEBUG: [chan 7] EOF sent (7)
+-2017-08-10 17:02:54,144 paramiko.transport DEBUG: [chan 8] Max packet in: 32768 bytes
+-2017-08-10 17:02:54,182 paramiko.transport DEBUG: [chan 8] Max packet out: 32768 bytes
+-2017-08-10 17:02:54,183 paramiko.transport DEBUG: Secsh channel 8 opened.
+-2017-08-10 17:02:54,227 paramiko.transport DEBUG: [chan 8] Sesch channel 8 request ok
+-2017-08-10 17:02:54,329 paramiko.transport DEBUG: [chan 8] EOF received (8)
+-2017-08-10 17:02:54,329 paramiko.transport DEBUG: [chan 8] EOF sent (8)
+-2017-08-10 17:02:54,994 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:01,859 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:08,873 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:11,702 Host  DEBUG: host2: updated
+-2017-08-10 17:03:11,703 paramiko.transport DEBUG: [chan 9] Max packet in: 32768 bytes
+-2017-08-10 17:03:11,710 paramiko.transport DEBUG: [chan 9] Max packet out: 32768 bytes
+-2017-08-10 17:03:11,710 paramiko.transport DEBUG: Secsh channel 9 opened.
+-2017-08-10 17:03:11,743 paramiko.transport DEBUG: [chan 9] Sesch channel 9 request ok
+-2017-08-10 17:03:13,766 paramiko.transport DEBUG: [chan 9] EOF received (9)
+-2017-08-10 17:03:13,767 paramiko.transport DEBUG: [chan 10] Max packet in: 32768 bytes
+-2017-08-10 17:03:13,770 paramiko.transport DEBUG: [chan 9] EOF sent (9)
+-2017-08-10 17:03:13,784 paramiko.transport DEBUG: [chan 10] Max packet out: 32768 bytes
+-2017-08-10 17:03:13,794 paramiko.transport DEBUG: Secsh channel 10 opened.
+-2017-08-10 17:03:13,859 paramiko.transport DEBUG: [chan 10] Sesch channel 10 request ok
+-2017-08-10 17:03:14,329 Host  DEBUG: host1: updated
+-2017-08-10 17:03:14,330 paramiko.transport DEBUG: [chan 9] Max packet in: 32768 bytes
+-2017-08-10 17:03:14,330 paramiko.transport DEBUG: [chan 9] Max packet out: 32768 bytes
+-2017-08-10 17:03:14,330 paramiko.transport DEBUG: Secsh channel 9 opened.
+-2017-08-10 17:03:14,332 paramiko.transport DEBUG: [chan 9] Sesch channel 9 request ok
+-2017-08-10 17:03:14,886 paramiko.transport DEBUG: [chan 10] EOF received (10)
+-2017-08-10 17:03:14,887 paramiko.transport DEBUG: [chan 10] EOF sent (10)
+-2017-08-10 17:03:14,887 paramiko.transport DEBUG: [chan 11] Max packet in: 32768 bytes
+-2017-08-10 17:03:14,927 paramiko.transport DEBUG: [chan 11] Max packet out: 32768 bytes
+-2017-08-10 17:03:14,927 paramiko.transport DEBUG: Secsh channel 11 opened.
+-2017-08-10 17:03:14,953 paramiko.transport DEBUG: [chan 11] Sesch channel 11 request ok
+-2017-08-10 17:03:14,971 paramiko.transport DEBUG: [chan 11] EOF received (11)
+-2017-08-10 17:03:14,972 paramiko.transport DEBUG: [chan 11] EOF sent (11)
+-2017-08-10 17:03:16,049 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:16,370 paramiko.transport DEBUG: [chan 9] EOF received (9)
+-2017-08-10 17:03:16,371 paramiko.transport DEBUG: [chan 9] EOF sent (9)
+-2017-08-10 17:03:16,371 paramiko.transport DEBUG: [chan 10] Max packet in: 32768 bytes
+-2017-08-10 17:03:16,410 paramiko.transport DEBUG: [chan 10] Max packet out: 32768 bytes
+-2017-08-10 17:03:16,411 paramiko.transport DEBUG: Secsh channel 10 opened.
+-2017-08-10 17:03:16,442 paramiko.transport DEBUG: [chan 10] Sesch channel 10 request ok
+-2017-08-10 17:03:17,488 paramiko.transport DEBUG: [chan 10] EOF received (10)
+-2017-08-10 17:03:17,489 paramiko.transport DEBUG: [chan 11] Max packet in: 32768 bytes
+-2017-08-10 17:03:17,509 paramiko.transport DEBUG: [chan 10] EOF sent (10)
+-2017-08-10 17:03:17,574 paramiko.transport DEBUG: [chan 11] Max packet out: 32768 bytes
+-2017-08-10 17:03:17,584 paramiko.transport DEBUG: Secsh channel 11 opened.
+-2017-08-10 17:03:17,632 paramiko.transport DEBUG: [chan 11] Sesch channel 11 request ok
+-2017-08-10 17:03:17,709 paramiko.transport DEBUG: [chan 11] EOF received (11)
+-2017-08-10 17:03:17,732 paramiko.transport DEBUG: [chan 11] EOF sent (11)
+-2017-08-10 17:03:23,692 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:30,840 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:34,972 Host  DEBUG: host2: updated
+-2017-08-10 17:03:34,973 paramiko.transport DEBUG: [chan 12] Max packet in: 32768 bytes
+-2017-08-10 17:03:34,973 paramiko.transport DEBUG: [chan 12] Max packet out: 32768 bytes
+-2017-08-10 17:03:34,976 paramiko.transport DEBUG: Secsh channel 12 opened.
+-2017-08-10 17:03:35,011 paramiko.transport DEBUG: [chan 12] Sesch channel 12 request ok
+-2017-08-10 17:03:37,041 paramiko.transport DEBUG: [chan 12] EOF received (12)
+-2017-08-10 17:03:37,041 paramiko.transport DEBUG: [chan 13] Max packet in: 32768 bytes
+-2017-08-10 17:03:37,063 paramiko.transport DEBUG: [chan 12] EOF sent (12)
+-2017-08-10 17:03:37,071 paramiko.transport DEBUG: [chan 13] Max packet out: 32768 bytes
+-2017-08-10 17:03:37,078 paramiko.transport DEBUG: Secsh channel 13 opened.
+-2017-08-10 17:03:37,106 paramiko.transport DEBUG: [chan 13] Sesch channel 13 request ok
+-2017-08-10 17:03:37,620 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:37,709 Host  DEBUG: host1: updated
+-2017-08-10 17:03:37,709 paramiko.transport DEBUG: [chan 12] Max packet in: 32768 bytes
+-2017-08-10 17:03:37,715 paramiko.transport DEBUG: [chan 12] Max packet out: 32768 bytes
+-2017-08-10 17:03:37,717 paramiko.transport DEBUG: Secsh channel 12 opened.
+-2017-08-10 17:03:37,724 paramiko.transport DEBUG: [chan 12] Sesch channel 12 request ok
+-2017-08-10 17:03:38,164 paramiko.transport DEBUG: [chan 13] EOF received (13)
+-2017-08-10 17:03:38,164 paramiko.transport DEBUG: [chan 14] Max packet in: 32768 bytes
+-2017-08-10 17:03:38,186 paramiko.transport DEBUG: [chan 13] EOF sent (13)
+-2017-08-10 17:03:38,249 paramiko.transport DEBUG: [chan 14] Max packet out: 32768 bytes
+-2017-08-10 17:03:38,263 paramiko.transport DEBUG: Secsh channel 14 opened.
+-2017-08-10 17:03:38,317 paramiko.transport DEBUG: [chan 14] Sesch channel 14 request ok
+-2017-08-10 17:03:38,350 paramiko.transport DEBUG: [chan 14] EOF received (14)
+-2017-08-10 17:03:38,351 paramiko.transport DEBUG: [chan 14] EOF sent (14)
+-2017-08-10 17:03:39,786 paramiko.transport DEBUG: [chan 13] Max packet in: 32768 bytes
+-2017-08-10 17:03:39,785 paramiko.transport DEBUG: [chan 12] EOF received (12)
+-2017-08-10 17:03:39,817 paramiko.transport DEBUG: [chan 12] EOF sent (12)
+-2017-08-10 17:03:39,878 paramiko.transport DEBUG: [chan 13] Max packet out: 32768 bytes
+-2017-08-10 17:03:39,880 paramiko.transport DEBUG: Secsh channel 13 opened.
+-2017-08-10 17:03:39,901 paramiko.transport DEBUG: [chan 13] Sesch channel 13 request ok
+-2017-08-10 17:03:40,966 paramiko.transport DEBUG: [chan 14] Max packet in: 32768 bytes
+-2017-08-10 17:03:40,966 paramiko.transport DEBUG: [chan 13] EOF received (13)
+-2017-08-10 17:03:41,014 paramiko.transport DEBUG: [chan 13] EOF sent (13)
+-2017-08-10 17:03:41,065 paramiko.transport DEBUG: [chan 14] Max packet out: 32768 bytes
+-2017-08-10 17:03:41,071 paramiko.transport DEBUG: Secsh channel 14 opened.
+-2017-08-10 17:03:41,130 paramiko.transport DEBUG: [chan 14] Sesch channel 14 request ok
+-2017-08-10 17:03:41,210 paramiko.transport DEBUG: [chan 14] EOF received (14)
+-2017-08-10 17:03:41,237 paramiko.transport DEBUG: [chan 14] EOF sent (14)
+-2017-08-10 17:03:45,826 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 17:03:58,351 Host  DEBUG: host2: updated
+-2017-08-10 17:03:58,352 paramiko.transport DEBUG: [chan 15] Max packet in: 32768 bytes
+-2017-08-10 17:03:58,353 paramiko.transport DEBUG: [chan 15] Max packet out: 32768 bytes
+-2017-08-10 17:03:58,355 paramiko.transport DEBUG: Secsh channel 15 opened.
+-2017-08-10 17:03:58,449 paramiko.transport DEBUG: [chan 15] Sesch channel 15 request ok
+-2017-08-10 17:04:00,377 paramiko.transport DEBUG: [chan 16] Max packet in: 32768 bytes
+-2017-08-10 17:04:00,377 paramiko.transport DEBUG: [chan 15] EOF received (15)
+-2017-08-10 17:04:00,410 paramiko.transport DEBUG: [chan 15] EOF sent (15)
+-2017-08-10 17:04:00,427 paramiko.transport DEBUG: [chan 16] Max packet out: 32768 bytes
+-2017-08-10 17:04:00,427 paramiko.transport DEBUG: Secsh channel 16 opened.
+-2017-08-10 17:04:00,466 paramiko.transport DEBUG: [chan 16] Sesch channel 16 request ok
+-2017-08-10 17:04:01,214 Host  DEBUG: host1: updated
+-2017-08-10 17:04:01,223 paramiko.transport DEBUG: [chan 15] Max packet in: 32768 bytes
+-2017-08-10 17:04:01,260 paramiko.transport DEBUG: [chan 15] Max packet out: 32768 bytes
+-2017-08-10 17:04:01,260 paramiko.transport DEBUG: Secsh channel 15 opened.
+-2017-08-10 17:04:01,289 paramiko.transport DEBUG: [chan 15] Sesch channel 15 request ok
+-2017-08-10 17:04:01,585 paramiko.transport DEBUG: [chan 16] EOF received (16)
+-2017-08-10 17:04:01,586 paramiko.transport DEBUG: [chan 17] Max packet in: 32768 bytes
+-2017-08-10 17:04:01,587 paramiko.transport DEBUG: [chan 16] EOF sent (16)
+-2017-08-10 17:04:01,630 paramiko.transport DEBUG: [chan 17] Max packet out: 32768 bytes
+-2017-08-10 17:04:01,642 paramiko.transport DEBUG: Secsh channel 17 opened.
+-2017-08-10 17:04:01,753 paramiko.transport DEBUG: [chan 17] Sesch channel 17 request ok
+-2017-08-10 17:04:01,770 paramiko.transport DEBUG: [chan 17] EOF received (17)
+-2017-08-10 17:04:01,772 paramiko.transport DEBUG: [chan 17] EOF sent (17)
+-2017-08-10 17:04:03,345 paramiko.transport DEBUG: [chan 16] Max packet in: 32768 bytes
+-2017-08-10 17:04:03,345 paramiko.transport DEBUG: [chan 15] EOF received (15)
+-2017-08-10 17:04:03,374 paramiko.transport DEBUG: [chan 15] EOF sent (15)
+-2017-08-10 17:04:03,446 paramiko.transport DEBUG: [chan 16] Max packet out: 32768 bytes
+-2017-08-10 17:04:03,452 paramiko.transport DEBUG: Secsh channel 16 opened.
+-2017-08-10 17:04:03,507 paramiko.transport DEBUG: [chan 16] Sesch channel 16 request ok
+-2017-08-10 17:04:04,507 paramiko.transport DEBUG: [chan 16] EOF received (16)
+-2017-08-10 17:04:04,507 paramiko.transport DEBUG: [chan 16] EOF sent (16)
+-2017-08-10 17:04:04,509 paramiko.transport DEBUG: [chan 17] Max packet in: 32768 bytes
+-2017-08-10 17:04:04,554 paramiko.transport DEBUG: [chan 17] Max packet out: 32768 bytes
+-2017-08-10 17:04:04,564 paramiko.transport DEBUG: Secsh channel 17 opened.
+-2017-08-10 17:04:04,589 paramiko.transport DEBUG: [chan 17] Sesch channel 17 request ok
+-2017-08-10 17:04:04,620 paramiko.transport DEBUG: [chan 17] EOF received (17)
+-2017-08-10 17:04:04,620 paramiko.transport DEBUG: [chan 17] EOF sent (17)
+-2017-08-10 17:04:13,301 Controller INFO: Disconnecting host(s)...
+-2017-08-10 17:04:13,329 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 17:04:13,337 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 17:04:13,429 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 17:04:13,451 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 17:04:13,452 Controller DEBUG: Shut down a server
+-2017-08-10 17:04:13,501 Controller INFO: Exit
+Index: Controller/Controller.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- Controller/Controller.py	(date 1503642236000)
++++ Controller/Controller.py	(revision )
+@@ -6,7 +6,7 @@
+ import time
+ import yaml
+ import copy
+-from Host_Object import Host
++from host_thread import Host_Thread
+ import os
+ import sys
+ import random
+@@ -65,7 +65,7 @@
+     for host in active_host:
+         commu, comp = host['rtt'], calculate_commp_latency(host)
+         if commu == 0 or comp == 0: continue
+-
++        print commu, comp
+         host['total_latency'] = commu + comp
+ 
+         # check 1: new wk not grater max.latency
+@@ -163,7 +163,7 @@
+                 active_hosts = []
+                 for h in host_threads:
+                     if not h.is_connected: continue
+-                    hh = {'hname': h.host_name, 'ip': h.host,
++                    hh = {'hname': h.host_name, 'ip': h.host_ip,
+                           'port': h.port, 'cpu': h.cpu, 'rtt': h.get_source_rtt(self.client_address[0]),
+                           'avg_proc_time': h.avg_process_time, 'proc': h.num_of_proc, 'total_latency': None,
+                           'max_core': h.num_of_core}
+@@ -250,8 +250,9 @@
+ 
+     for n, h_data in h_list.items():
+         try:
+-            h = Host(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['host-user'], h_data['host-pwd'],
+-                     controller_interval, h_data['cpu-core'], h_data['avg_ps'], config['host_update'])
++            h = Host_Thread(h_data['name'], h_data['host-ip'], h_data['sever-port'], h_data['http-port'],
++                            h_data['host-user'], h_data['host-pwd'],
++                            controller_interval, h_data['cpu-core'], h_data['avg_ps'], config['host_update'])
+             h.start()  # start host threat
+         except Exception as e:
+             logger.error('Cannot add host: {}: {}'.format(h_data['name'], e.message))
+Index: Controller/log/controller_0810-1654.log
+===================================================================
+--- Controller/log/controller_0810-1654.log	(date 1503642236000)
++++ Controller/log/controller_0810-1654.log	(date 1503642236000)
+@@ -1,131 +0,0 @@
+-2017-08-10 16:54:56,508 Controller INFO: load configuration...
+-2017-08-10 16:54:56,509 Controller INFO: Connecting host(s)...
+-2017-08-10 16:54:56,516 paramiko.transport DEBUG: starting thread (client mode): 0xa9a51e10L
+-2017-08-10 16:54:56,516 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 16:54:56,526 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 16:54:56,526 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 16:54:56,526 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 16:54:56,526 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 16:54:56,527 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 16:54:56,527 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 16:54:56,527 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 16:54:56,587 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 16:54:56,588 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 16:54:56,618 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 16:54:56,619 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 16:54:56,625 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:54:56,637 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 16:54:56,651 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:54:56,693 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 16:54:58,719 Host  DEBUG: host2: updated
+-2017-08-10 16:54:58,723 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 16:54:58,730 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 16:54:58,730 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 16:54:58,731 paramiko.transport DEBUG: starting thread (client mode): 0xa99f1890L
+-2017-08-10 16:54:58,731 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 16:54:58,731 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 16:54:58,731 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 16:54:58,732 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 16:54:58,732 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 16:54:58,732 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 16:54:58,732 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 16:54:58,732 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 16:54:58,752 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 16:54:58,801 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 16:54:58,801 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 16:54:58,832 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 16:54:58,833 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 16:54:58,838 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:54:58,849 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 16:54:58,865 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:54:58,877 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 16:54:58,983 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 16:54:58,983 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 16:55:00,755 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 16:55:00,756 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 16:55:00,756 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 16:55:00,757 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 16:55:00,757 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 16:55:00,794 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 16:55:00,804 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 16:55:00,804 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 16:55:00,887 Host  DEBUG: host1: updated
+-2017-08-10 16:55:00,888 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 16:55:00,888 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 16:55:00,888 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 16:55:00,890 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 16:55:01,888 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 16:55:01,889 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 16:55:01,889 Controller INFO: Controller is ready
+-2017-08-10 16:55:02,954 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 16:55:02,955 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 16:55:02,958 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 16:55:02,959 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 16:55:02,959 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 16:55:03,002 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 16:55:03,044 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 16:55:03,055 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 16:55:06,606 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:06,612 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 16:55:06,621 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 16:55:06,627 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 16:55:06,650 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 16:55:07,708 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 16:55:07,708 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 16:55:07,714 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 16:55:07,714 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 16:55:07,723 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 16:55:07,724 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 16:55:08,771 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 16:55:08,782 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 16:55:10,228 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:12,598 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:14,499 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:16,166 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:17,872 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:19,871 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:55:20,804 Host  DEBUG: host2: updated
+-2017-08-10 16:55:20,805 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 16:55:20,805 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 16:55:20,806 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 16:55:20,814 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 16:55:22,817 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 16:55:22,825 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 16:55:22,832 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 16:55:22,882 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 16:55:22,891 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 16:55:22,978 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 16:55:23,046 Host  DEBUG: host1: updated
+-2017-08-10 16:55:23,058 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 16:55:23,078 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 16:55:23,078 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 16:55:23,116 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 16:55:23,977 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 16:55:23,977 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 16:55:24,034 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 16:55:24,066 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 16:55:24,078 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 16:55:24,124 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 16:55:24,125 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 16:55:24,200 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 16:55:25,128 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 16:55:25,128 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 16:55:25,141 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 16:55:25,212 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 16:55:25,230 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 16:55:25,258 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 16:55:26,280 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 16:55:26,279 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 16:55:26,286 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 16:55:26,324 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 16:55:26,343 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 16:55:26,388 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 16:55:26,440 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 16:55:26,482 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 16:55:34,486 Controller INFO: Disconnecting host(s)...
+-2017-08-10 16:55:34,521 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 16:55:34,529 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 16:55:34,619 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 16:55:34,661 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 16:55:34,661 Controller DEBUG: Shut down a server
+-2017-08-10 16:55:34,921 Controller INFO: Exit
+Index: Controller/log/controller_0810-1658.log
+===================================================================
+--- Controller/log/controller_0810-1658.log	(date 1503642236000)
++++ Controller/log/controller_0810-1658.log	(date 1503642236000)
+@@ -1,261 +0,0 @@
+-2017-08-10 16:58:06,731 Controller INFO: load configuration...
+-2017-08-10 16:58:06,733 Controller INFO: Connecting host(s)...
+-2017-08-10 16:58:06,746 paramiko.transport DEBUG: starting thread (client mode): 0x4d353e10L
+-2017-08-10 16:58:06,746 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 16:58:06,755 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_6.6p1 Ubuntu-2ubuntu1
+-2017-08-10 16:58:06,756 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_6.6p1)
+-2017-08-10 16:58:06,756 paramiko.transport DEBUG: kex algos:[u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group-exchange-sha1', u'diffie-hellman-group14-sha1', u'diffie-hellman-group1-sha1'] server key:[u'ssh-rsa', u'ssh-dss', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] server encrypt:[u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'arcfour256', u'arcfour128', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'chacha20-poly1305@openssh.com', u'aes128-cbc', u'3des-cbc', u'blowfish-cbc', u'cast128-cbc', u'aes192-cbc', u'aes256-cbc', u'arcfour', u'rijndael-cbc@lysator.liu.se'] client mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] server mac:[u'hmac-md5-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-ripemd160-etm@openssh.com', u'hmac-sha1-96-etm@openssh.com', u'hmac-md5-96-etm@openssh.com', u'hmac-md5', u'hmac-sha1', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-ripemd160', u'hmac-ripemd160@openssh.com', u'hmac-sha1-96', u'hmac-md5-96'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 16:58:06,756 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group1-sha1
+-2017-08-10 16:58:06,756 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 16:58:06,757 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 16:58:06,757 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 16:58:06,816 paramiko.transport DEBUG: kex engine KexGroup1 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 16:58:06,817 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 16:58:06,848 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.80: 8a7a571eab8057b78830e2152fb83e45
+-2017-08-10 16:58:06,849 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 16:58:06,854 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:58:06,868 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 16:58:06,882 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:58:06,925 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 16:58:08,991 Host  DEBUG: host2: updated
+-2017-08-10 16:58:08,991 paramiko.transport DEBUG: starting thread (client mode): 0x4d2f27d0L
+-2017-08-10 16:58:08,992 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 16:58:08,993 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 16:58:08,993 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 16:58:08,993 paramiko.transport DEBUG: Local version/idstring: SSH-2.0-paramiko_1.16.0
+-2017-08-10 16:58:08,993 paramiko.transport DEBUG: Remote version/idstring: SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.2
+-2017-08-10 16:58:08,993 paramiko.transport INFO: Connected (version 2.0, client OpenSSH_7.2p2)
+-2017-08-10 16:58:08,994 paramiko.transport DEBUG: kex algos:[u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1', u'diffie-hellman-group-exchange-sha1'] server key:[u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ecdsa-sha2-nistp256', u'ssh-ed25519'] client encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] server encrypt:[u'aes256-gcm@openssh.com', u'aes128-gcm@openssh.com', u'aes256-ctr', u'aes128-ctr'] client mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] server mac:[u'hmac-sha2-512-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-512', u'hmac-sha2-256', u'hmac-ripemd160', u'hmac-sha1'] client compress:[u'none', u'zlib@openssh.com'] server compress:[u'none', u'zlib@openssh.com'] client lang:[u''] server lang:[u''] kex follows?False
+-2017-08-10 16:58:08,994 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 16:58:08,995 paramiko.transport DEBUG: Kex agreed: diffie-hellman-group14-sha1
+-2017-08-10 16:58:08,995 paramiko.transport DEBUG: Cipher agreed: aes128-ctr
+-2017-08-10 16:58:08,995 paramiko.transport DEBUG: MAC agreed: hmac-sha2-256
+-2017-08-10 16:58:08,995 paramiko.transport DEBUG: Compression agreed: none
+-2017-08-10 16:58:09,061 paramiko.transport DEBUG: kex engine KexGroup14 specified hash_algo <built-in function openssl_sha1>
+-2017-08-10 16:58:09,061 paramiko.transport DEBUG: Switch to new keys ...
+-2017-08-10 16:58:09,093 paramiko.transport DEBUG: Adding ssh-rsa host key for 131.112.21.86: c048d6b6f26de21fbae17e1c16959a60
+-2017-08-10 16:58:09,094 paramiko.transport DEBUG: Trying SSH agent key 78176c286d2d7a7b835bccf21c0b78c1
+-2017-08-10 16:58:09,101 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:58:09,113 paramiko.transport INFO: Authentication (publickey) failed.
+-2017-08-10 16:58:09,126 paramiko.transport DEBUG: userauth is OK
+-2017-08-10 16:58:09,137 paramiko.transport INFO: Authentication (password) successful!
+-2017-08-10 16:58:09,252 paramiko.transport DEBUG: Received global request "hostkeys-00@openssh.com"
+-2017-08-10 16:58:09,252 paramiko.transport DEBUG: Rejecting "hostkeys-00@openssh.com" global request from server.
+-2017-08-10 16:58:10,998 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 16:58:10,999 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 16:58:10,999 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 16:58:10,999 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 16:58:11,000 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 16:58:11,038 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 16:58:11,049 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 16:58:11,049 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 16:58:11,144 Host  DEBUG: host1: updated
+-2017-08-10 16:58:11,144 paramiko.transport DEBUG: [chan 0] Max packet in: 32768 bytes
+-2017-08-10 16:58:11,145 paramiko.transport DEBUG: [chan 0] Max packet out: 32768 bytes
+-2017-08-10 16:58:11,145 paramiko.transport DEBUG: Secsh channel 0 opened.
+-2017-08-10 16:58:11,146 paramiko.transport DEBUG: [chan 0] Sesch channel 0 request ok
+-2017-08-10 16:58:12,144 Controller DEBUG: Start sever_thread waiting requests for sources
+-2017-08-10 16:58:12,145 Controller DEBUG: Server loop running in threadThread-7
+-2017-08-10 16:58:12,145 Controller INFO: Controller is ready
+-2017-08-10 16:58:13,173 paramiko.transport DEBUG: [chan 1] Max packet in: 32768 bytes
+-2017-08-10 16:58:13,172 paramiko.transport DEBUG: [chan 0] EOF received (0)
+-2017-08-10 16:58:13,214 paramiko.transport DEBUG: [chan 0] EOF sent (0)
+-2017-08-10 16:58:13,257 paramiko.transport DEBUG: [chan 1] Max packet out: 32768 bytes
+-2017-08-10 16:58:13,257 paramiko.transport DEBUG: Secsh channel 1 opened.
+-2017-08-10 16:58:13,274 paramiko.transport DEBUG: [chan 1] Sesch channel 1 request ok
+-2017-08-10 16:58:13,333 paramiko.transport DEBUG: [chan 1] EOF received (1)
+-2017-08-10 16:58:13,344 paramiko.transport DEBUG: [chan 1] EOF sent (1)
+-2017-08-10 16:58:22,384 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:22,410 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 16:58:22,439 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 16:58:22,439 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 16:58:22,481 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 16:58:23,470 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 16:58:23,473 paramiko.transport DEBUG: [chan 2] Max packet in: 32768 bytes
+-2017-08-10 16:58:23,510 paramiko.transport DEBUG: [chan 2] Max packet out: 32768 bytes
+-2017-08-10 16:58:23,510 paramiko.transport DEBUG: Secsh channel 2 opened.
+-2017-08-10 16:58:23,516 paramiko.transport DEBUG: [chan 2] Sesch channel 2 request ok
+-2017-08-10 16:58:23,517 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 16:58:24,584 paramiko.transport DEBUG: [chan 2] EOF received (2)
+-2017-08-10 16:58:24,597 paramiko.transport DEBUG: [chan 2] EOF sent (2)
+-2017-08-10 16:58:26,795 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:29,538 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:31,049 Host  DEBUG: host2: updated
+-2017-08-10 16:58:31,049 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 16:58:31,123 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 16:58:31,127 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 16:58:31,127 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:31,151 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 16:58:32,651 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:33,183 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 16:58:33,183 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 16:58:33,188 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 16:58:33,204 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 16:58:33,206 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 16:58:33,252 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 16:58:33,333 Host  DEBUG: host1: updated
+-2017-08-10 16:58:33,334 paramiko.transport DEBUG: [chan 3] Max packet in: 32768 bytes
+-2017-08-10 16:58:33,334 paramiko.transport DEBUG: [chan 3] Max packet out: 32768 bytes
+-2017-08-10 16:58:33,334 paramiko.transport DEBUG: Secsh channel 3 opened.
+-2017-08-10 16:58:33,336 paramiko.transport DEBUG: [chan 3] Sesch channel 3 request ok
+-2017-08-10 16:58:34,299 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 16:58:34,300 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 16:58:34,340 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 16:58:34,380 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 16:58:34,382 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 16:58:34,457 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 16:58:34,513 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 16:58:34,521 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 16:58:34,845 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:35,362 paramiko.transport DEBUG: [chan 3] EOF received (3)
+-2017-08-10 16:58:35,366 paramiko.transport DEBUG: [chan 4] Max packet in: 32768 bytes
+-2017-08-10 16:58:35,376 paramiko.transport DEBUG: [chan 3] EOF sent (3)
+-2017-08-10 16:58:35,401 paramiko.transport DEBUG: [chan 4] Max packet out: 32768 bytes
+-2017-08-10 16:58:35,411 paramiko.transport DEBUG: Secsh channel 4 opened.
+-2017-08-10 16:58:35,434 paramiko.transport DEBUG: [chan 4] Sesch channel 4 request ok
+-2017-08-10 16:58:36,447 paramiko.transport DEBUG: [chan 4] EOF received (4)
+-2017-08-10 16:58:36,447 paramiko.transport DEBUG: [chan 5] Max packet in: 32768 bytes
+-2017-08-10 16:58:36,460 paramiko.transport DEBUG: [chan 4] EOF sent (4)
+-2017-08-10 16:58:36,471 paramiko.transport DEBUG: [chan 5] Max packet out: 32768 bytes
+-2017-08-10 16:58:36,473 paramiko.transport DEBUG: Secsh channel 5 opened.
+-2017-08-10 16:58:36,507 paramiko.transport DEBUG: [chan 5] Sesch channel 5 request ok
+-2017-08-10 16:58:36,609 paramiko.transport DEBUG: [chan 5] EOF received (5)
+-2017-08-10 16:58:36,609 paramiko.transport DEBUG: [chan 5] EOF sent (5)
+-2017-08-10 16:58:36,824 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:38,469 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:40,740 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:43,236 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:44,917 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:46,683 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:48,278 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:50,082 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:51,927 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:53,622 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:54,518 Host  DEBUG: host2: updated
+-2017-08-10 16:58:54,518 paramiko.transport DEBUG: [chan 6] Max packet in: 32768 bytes
+-2017-08-10 16:58:54,526 paramiko.transport DEBUG: [chan 6] Max packet out: 32768 bytes
+-2017-08-10 16:58:54,526 paramiko.transport DEBUG: Secsh channel 6 opened.
+-2017-08-10 16:58:54,535 paramiko.transport DEBUG: [chan 6] Sesch channel 6 request ok
+-2017-08-10 16:58:55,736 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:58:56,609 Host  DEBUG: host1: updated
+-2017-08-10 16:58:56,610 paramiko.transport DEBUG: [chan 6] Max packet in: 32768 bytes
+-2017-08-10 16:58:56,610 paramiko.transport DEBUG: [chan 6] Max packet out: 32768 bytes
+-2017-08-10 16:58:56,611 paramiko.transport DEBUG: Secsh channel 6 opened.
+-2017-08-10 16:58:56,612 paramiko.transport DEBUG: [chan 6] Sesch channel 6 request ok
+-2017-08-10 16:58:56,656 paramiko.transport DEBUG: [chan 6] EOF received (6)
+-2017-08-10 16:58:56,656 paramiko.transport DEBUG: [chan 6] EOF sent (6)
+-2017-08-10 16:58:56,657 paramiko.transport DEBUG: [chan 7] Max packet in: 32768 bytes
+-2017-08-10 16:58:56,702 paramiko.transport DEBUG: [chan 7] Max packet out: 32768 bytes
+-2017-08-10 16:58:56,703 paramiko.transport DEBUG: Secsh channel 7 opened.
+-2017-08-10 16:58:56,737 paramiko.transport DEBUG: [chan 7] Sesch channel 7 request ok
+-2017-08-10 16:58:57,731 paramiko.transport DEBUG: [chan 8] Max packet in: 32768 bytes
+-2017-08-10 16:58:57,731 paramiko.transport DEBUG: [chan 7] EOF received (7)
+-2017-08-10 16:58:57,772 paramiko.transport DEBUG: [chan 7] EOF sent (7)
+-2017-08-10 16:58:57,866 paramiko.transport DEBUG: [chan 8] Max packet out: 32768 bytes
+-2017-08-10 16:58:57,875 paramiko.transport DEBUG: Secsh channel 8 opened.
+-2017-08-10 16:58:57,978 paramiko.transport DEBUG: [chan 8] Sesch channel 8 request ok
+-2017-08-10 16:58:58,032 paramiko.transport DEBUG: [chan 8] EOF received (8)
+-2017-08-10 16:58:58,032 paramiko.transport DEBUG: [chan 8] EOF sent (8)
+-2017-08-10 16:58:58,651 paramiko.transport DEBUG: [chan 7] Max packet in: 32768 bytes
+-2017-08-10 16:58:58,652 paramiko.transport DEBUG: [chan 6] EOF received (6)
+-2017-08-10 16:58:58,653 paramiko.transport DEBUG: [chan 6] EOF sent (6)
+-2017-08-10 16:58:58,653 paramiko.transport DEBUG: [chan 7] Max packet out: 32768 bytes
+-2017-08-10 16:58:58,653 paramiko.transport DEBUG: Secsh channel 7 opened.
+-2017-08-10 16:58:58,691 paramiko.transport DEBUG: [chan 7] Sesch channel 7 request ok
+-2017-08-10 16:58:59,749 paramiko.transport DEBUG: [chan 7] EOF received (7)
+-2017-08-10 16:58:59,750 paramiko.transport DEBUG: [chan 8] Max packet in: 32768 bytes
+-2017-08-10 16:58:59,755 paramiko.transport DEBUG: [chan 7] EOF sent (7)
+-2017-08-10 16:58:59,779 paramiko.transport DEBUG: [chan 8] Max packet out: 32768 bytes
+-2017-08-10 16:58:59,782 paramiko.transport DEBUG: Secsh channel 8 opened.
+-2017-08-10 16:58:59,807 paramiko.transport DEBUG: [chan 8] Sesch channel 8 request ok
+-2017-08-10 16:58:59,904 paramiko.transport DEBUG: [chan 8] EOF received (8)
+-2017-08-10 16:58:59,911 paramiko.transport DEBUG: [chan 8] EOF sent (8)
+-2017-08-10 16:59:18,047 Host  DEBUG: host2: updated
+-2017-08-10 16:59:18,057 paramiko.transport DEBUG: [chan 9] Max packet in: 32768 bytes
+-2017-08-10 16:59:18,142 paramiko.transport DEBUG: [chan 9] Max packet out: 32768 bytes
+-2017-08-10 16:59:18,143 paramiko.transport DEBUG: Secsh channel 9 opened.
+-2017-08-10 16:59:18,230 paramiko.transport DEBUG: [chan 9] Sesch channel 9 request ok
+-2017-08-10 16:59:19,904 Host  DEBUG: host1: updated
+-2017-08-10 16:59:19,940 paramiko.transport DEBUG: [chan 9] Max packet in: 32768 bytes
+-2017-08-10 16:59:19,980 paramiko.transport DEBUG: [chan 9] Max packet out: 32768 bytes
+-2017-08-10 16:59:19,981 paramiko.transport DEBUG: Secsh channel 9 opened.
+-2017-08-10 16:59:20,066 paramiko.transport DEBUG: [chan 9] Sesch channel 9 request ok
+-2017-08-10 16:59:20,190 paramiko.transport DEBUG: [chan 9] EOF received (9)
+-2017-08-10 16:59:20,191 paramiko.transport DEBUG: [chan 10] Max packet in: 32768 bytes
+-2017-08-10 16:59:20,204 paramiko.transport DEBUG: [chan 9] EOF sent (9)
+-2017-08-10 16:59:20,246 paramiko.transport DEBUG: [chan 10] Max packet out: 32768 bytes
+-2017-08-10 16:59:20,246 paramiko.transport DEBUG: Secsh channel 10 opened.
+-2017-08-10 16:59:20,337 paramiko.transport DEBUG: [chan 10] Sesch channel 10 request ok
+-2017-08-10 16:59:21,406 paramiko.transport DEBUG: [chan 11] Max packet in: 32768 bytes
+-2017-08-10 16:59:21,407 paramiko.transport DEBUG: [chan 10] EOF received (10)
+-2017-08-10 16:59:21,438 paramiko.transport DEBUG: [chan 10] EOF sent (10)
+-2017-08-10 16:59:21,566 paramiko.transport DEBUG: [chan 11] Max packet out: 32768 bytes
+-2017-08-10 16:59:21,591 paramiko.transport DEBUG: Secsh channel 11 opened.
+-2017-08-10 16:59:21,642 paramiko.transport DEBUG: [chan 11] Sesch channel 11 request ok
+-2017-08-10 16:59:21,730 paramiko.transport DEBUG: [chan 11] EOF received (11)
+-2017-08-10 16:59:21,794 paramiko.transport DEBUG: [chan 11] EOF sent (11)
+-2017-08-10 16:59:22,073 paramiko.transport DEBUG: [chan 10] Max packet in: 32768 bytes
+-2017-08-10 16:59:22,073 paramiko.transport DEBUG: [chan 9] EOF received (9)
+-2017-08-10 16:59:22,150 paramiko.transport DEBUG: [chan 9] EOF sent (9)
+-2017-08-10 16:59:22,182 paramiko.transport DEBUG: [chan 10] Max packet out: 32768 bytes
+-2017-08-10 16:59:22,188 paramiko.transport DEBUG: Secsh channel 10 opened.
+-2017-08-10 16:59:22,253 paramiko.transport DEBUG: [chan 10] Sesch channel 10 request ok
+-2017-08-10 16:59:23,256 paramiko.transport DEBUG: [chan 10] EOF received (10)
+-2017-08-10 16:59:23,256 paramiko.transport DEBUG: [chan 10] EOF sent (10)
+-2017-08-10 16:59:23,256 paramiko.transport DEBUG: [chan 11] Max packet in: 32768 bytes
+-2017-08-10 16:59:23,294 paramiko.transport DEBUG: [chan 11] Max packet out: 32768 bytes
+-2017-08-10 16:59:23,295 paramiko.transport DEBUG: Secsh channel 11 opened.
+-2017-08-10 16:59:23,321 paramiko.transport DEBUG: [chan 11] Sesch channel 11 request ok
+-2017-08-10 16:59:23,393 paramiko.transport DEBUG: [chan 11] EOF received (11)
+-2017-08-10 16:59:23,393 paramiko.transport DEBUG: [chan 11] EOF sent (11)
+-2017-08-10 16:59:33,860 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:59:35,817 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:59:37,394 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:59:39,191 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:59:40,834 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:59:41,730 Host  DEBUG: host2: updated
+-2017-08-10 16:59:41,731 paramiko.transport DEBUG: [chan 12] Max packet in: 32768 bytes
+-2017-08-10 16:59:41,734 paramiko.transport DEBUG: [chan 12] Max packet out: 32768 bytes
+-2017-08-10 16:59:41,735 paramiko.transport DEBUG: Secsh channel 12 opened.
+-2017-08-10 16:59:41,859 paramiko.transport DEBUG: [chan 12] Sesch channel 12 request ok
+-2017-08-10 16:59:42,591 Controller DEBUG: recv() from 131.112.21.86
+-2017-08-10 16:59:43,396 Host  DEBUG: host1: updated
+-2017-08-10 16:59:43,399 paramiko.transport DEBUG: [chan 12] Max packet in: 32768 bytes
+-2017-08-10 16:59:43,429 paramiko.transport DEBUG: [chan 12] Max packet out: 32768 bytes
+-2017-08-10 16:59:43,436 paramiko.transport DEBUG: Secsh channel 12 opened.
+-2017-08-10 16:59:43,464 paramiko.transport DEBUG: [chan 12] Sesch channel 12 request ok
+-2017-08-10 16:59:43,757 paramiko.transport DEBUG: [chan 13] Max packet in: 32768 bytes
+-2017-08-10 16:59:43,766 paramiko.transport DEBUG: [chan 12] EOF received (12)
+-2017-08-10 16:59:43,773 paramiko.transport DEBUG: [chan 12] EOF sent (12)
+-2017-08-10 16:59:43,774 paramiko.transport DEBUG: [chan 13] Max packet out: 32768 bytes
+-2017-08-10 16:59:43,774 paramiko.transport DEBUG: Secsh channel 13 opened.
+-2017-08-10 16:59:43,828 paramiko.transport DEBUG: [chan 13] Sesch channel 13 request ok
+-2017-08-10 16:59:44,826 paramiko.transport DEBUG: [chan 13] EOF received (13)
+-2017-08-10 16:59:44,827 paramiko.transport DEBUG: [chan 13] EOF sent (13)
+-2017-08-10 16:59:44,827 paramiko.transport DEBUG: [chan 14] Max packet in: 32768 bytes
+-2017-08-10 16:59:44,917 paramiko.transport DEBUG: [chan 14] Max packet out: 32768 bytes
+-2017-08-10 16:59:44,917 paramiko.transport DEBUG: Secsh channel 14 opened.
+-2017-08-10 16:59:44,932 paramiko.transport DEBUG: [chan 14] Sesch channel 14 request ok
+-2017-08-10 16:59:45,020 paramiko.transport DEBUG: [chan 14] EOF received (14)
+-2017-08-10 16:59:45,023 paramiko.transport DEBUG: [chan 14] EOF sent (14)
+-2017-08-10 16:59:45,488 paramiko.transport DEBUG: [chan 12] EOF received (12)
+-2017-08-10 16:59:45,494 paramiko.transport DEBUG: [chan 13] Max packet in: 32768 bytes
+-2017-08-10 16:59:45,501 paramiko.transport DEBUG: [chan 12] EOF sent (12)
+-2017-08-10 16:59:45,512 paramiko.transport DEBUG: [chan 13] Max packet out: 32768 bytes
+-2017-08-10 16:59:45,517 paramiko.transport DEBUG: Secsh channel 13 opened.
+-2017-08-10 16:59:45,553 paramiko.transport DEBUG: [chan 13] Sesch channel 13 request ok
+-2017-08-10 16:59:46,586 paramiko.transport DEBUG: [chan 13] EOF received (13)
+-2017-08-10 16:59:46,586 paramiko.transport DEBUG: [chan 14] Max packet in: 32768 bytes
+-2017-08-10 16:59:46,587 paramiko.transport DEBUG: [chan 13] EOF sent (13)
+-2017-08-10 16:59:46,587 paramiko.transport DEBUG: [chan 14] Max packet out: 32768 bytes
+-2017-08-10 16:59:46,587 paramiko.transport DEBUG: Secsh channel 14 opened.
+-2017-08-10 16:59:46,627 paramiko.transport DEBUG: [chan 14] Sesch channel 14 request ok
+-2017-08-10 16:59:46,660 paramiko.transport DEBUG: [chan 14] EOF received (14)
+-2017-08-10 16:59:46,660 paramiko.transport DEBUG: [chan 14] EOF sent (14)
+-2017-08-10 17:00:00,845 Controller INFO: Disconnecting host(s)...
+-2017-08-10 17:00:00,924 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 17:00:00,929 Host  DEBUG: 131.112.21.80: closed
+-2017-08-10 17:00:01,030 paramiko.transport DEBUG: EOF in transport thread
+-2017-08-10 17:00:01,045 Host  DEBUG: 131.112.21.86: closed
+-2017-08-10 17:00:01,047 Controller DEBUG: Shut down a server
+-2017-08-10 17:00:01,190 Controller INFO: Exit
